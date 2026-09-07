@@ -350,6 +350,13 @@ const commands = [
         .setName('campo')
         .setDescription('Path del campo da isolare, es. "rankings". Vuoto = elenco chiavi.')
         .setRequired(false),
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName('metodo')
+        .setDescription('GET (default) o POST — alcuni endpoint come company.getCompanies richiedono POST')
+        .setRequired(false)
+        .addChoices({ name: 'GET', value: 'GET' }, { name: 'POST', value: 'POST' }),
     ),
 
   new SlashCommandBuilder()
@@ -738,6 +745,7 @@ client.on('interactionCreate', async (interaction) => {
       const endpoint = interaction.options.getString('endpoint');
       const paramsStr = interaction.options.getString('parametri') || '{}';
       const campo = interaction.options.getString('campo');
+      const metodo = interaction.options.getString('metodo') || 'GET';
       let params;
       try {
         params = JSON.parse(paramsStr);
@@ -745,7 +753,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply('I "parametri" devono essere un JSON valido, es. {"userId":"123"}');
         return;
       }
-      const data = await warera.raw(endpoint, params);
+      const data = metodo === 'POST' ? await warera.rawPost(endpoint, params) : await warera.raw(endpoint, params);
       const base = Array.isArray(data) ? data[0] : data;
 
       let output;
