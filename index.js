@@ -244,51 +244,48 @@ async function buildMuReportEmbed(muId, isAutomatic = false) {
 
   const errorMessage = errorCount > 0 ? `\n⚠️ ${errorCount} membro/i non recuperato/i correttamente.` : '';
 
+  // Ordine alfabetico: resta stabile nel tempo, utile per confrontare lo
+  // stesso giocatore report dopo report (a differenza dell'ordine per danni).
   members.sort((a, b) => a.username.localeCompare(b.username, 'it', { sensitivity: 'base' }));
 
-  const memberList = members.map(m => {
-    const weekly = m.weeklyDamage !== null ? numberFmt(m.weeklyDamage) : 'n/d';
-    const total = m.totalDamage !== null ? numberFmt(m.totalDamage) : 'n/d';
-    const wealth = m.wealth !== null ? numberFmt(m.wealth) : 'n/d';
-    return `• **${m.username}**  (Sett: ${weekly} | Tot: ${total} | Ricch: ${wealth})`;
-  }).join('\n');
+  // --- Tabella allineata a colonne, senza bordi laterali ---------------
+  const NAME_W = Math.min(16, Math.max(10, ...members.map((m) => m.username.length)));
+  const VAL_W = 7;
+  const col = (s, len) => String(s).slice(0, len).padEnd(len, ' ');
+  const colR = (s, len) => String(s).slice(0, len).padStart(len, ' ');
+  const row = (name, v1, v2, v3) =>
+    `${col(name, NAME_W)}   ${colR(v1, VAL_W)}   ${colR(v2, VAL_W)}   ${colR(v3, VAL_W)}`;
+
+  const headerRow = row('Nome', 'Sett.', 'Tot.', 'Ricch.');
+  const separator = '-'.repeat(headerRow.length);
 
   const MAX_FIELD_VALUE = 1024;
+  const wrap = (lines) => '```\n' + lines.join('\n') + '\n```';
+
   const memberFields = [];
+  let currentLines = [headerRow, separator];
 
-  if (!memberList || memberList.length === 0) {
-    memberFields.push({
-      name: '📋 Membri',
-      value: 'Nessun membro trovato in questa MU.',
-    });
-  } else if (memberList.length <= MAX_FIELD_VALUE) {
-    memberFields.push({
-      name: '📋 Membri (ordine alfabetico)',
-      value: memberList,
-    });
-  } else {
-    const lines = memberList.split('\n');
-    let currentChunk = '';
-    let chunkCount = 1;
-
-    for (const line of lines) {
-      if ((currentChunk + '\n' + line).length <= MAX_FIELD_VALUE) {
-        currentChunk += (currentChunk ? '\n' : '') + line;
-      } else {
-        memberFields.push({
-          name: chunkCount === 1 ? '📋 Membri (ordine alfabetico)' : '\u200b',
-          value: currentChunk,
-        });
-        currentChunk = line;
-        chunkCount++;
-      }
-    }
-    if (currentChunk) {
+  for (const m of members) {
+    const line = row(m.username, numberFmt(m.weeklyDamage), numberFmt(m.totalDamage), numberFmt(m.wealth));
+    const candidate = currentLines.concat([line]);
+    if (wrap(candidate).length <= MAX_FIELD_VALUE) {
+      currentLines = candidate;
+    } else {
       memberFields.push({
-        name: '\u200b',
-        value: currentChunk,
+        name: memberFields.length === 0 ? '📋 Membri (ordine alfabetico)' : '\u200b',
+        value: wrap(currentLines),
       });
+      currentLines = [headerRow, separator, line];
     }
+  }
+  if (currentLines.length > 2) {
+    memberFields.push({
+      name: memberFields.length === 0 ? '📋 Membri (ordine alfabetico)' : '\u200b',
+      value: wrap(currentLines),
+    });
+  }
+  if (memberFields.length === 0) {
+    memberFields.push({ name: '📋 Membri', value: 'Nessun membro trovato in questa MU.' });
   }
 
   const hq = mu.activeUpgradeLevels?.headquarters ?? 0;
@@ -619,7 +616,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       const searchTerm = interaction.options.getString('cerca');
       
-      const isId = /^\d+$/.test(searchTerm);
+      const isId = /^[0-9a-fA-F]{24}$/.test(searchTerm); // ID WarEra = 24 caratteri esadecimali (MongoDB ObjectId)
       let userId = searchTerm;
       let usedName = null;
       
@@ -671,7 +668,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       const searchTerm = interaction.options.getString('cerca');
       
-      const isId = /^\d+$/.test(searchTerm);
+      const isId = /^[0-9a-fA-F]{24}$/.test(searchTerm); // ID WarEra = 24 caratteri esadecimali (MongoDB ObjectId)
       let muId = searchTerm;
       let usedName = null;
       
@@ -732,7 +729,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       const searchTerm = interaction.options.getString('cerca');
       
-      const isId = /^\d+$/.test(searchTerm);
+      const isId = /^[0-9a-fA-F]{24}$/.test(searchTerm); // ID WarEra = 24 caratteri esadecimali (MongoDB ObjectId)
       let regionId = searchTerm;
       let usedName = null;
       
