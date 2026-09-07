@@ -103,70 +103,35 @@ async function resolveCountryName(countryId) {
   }
 }
 
-// --- Funzioni di ricerca ROBUSTE (con debug) ---
+// --- Funzioni di ricerca (usano search.searchAnything: restituisce solo ID,
+// gia' ordinati per pertinenza da WarEra, non oggetti con username) --------
 
 async function findUserIdByName(searchTerm) {
   try {
-    const results = await warera.raw('search.searchAnything', { query: searchTerm });
-    
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] Ricerca: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
-    console.log(`🔍 Debug ricerca salvato in debug_search.log per "${searchTerm}"`);
-    
-    const users = results.users || [];
-    if (users.length === 0) {
-      console.log(`⚠️ Nessun utente trovato per "${searchTerm}" nei risultati.`);
+    const results = await warera.raw('search.searchAnything', { searchText: searchTerm });
+    const ids = results.userIds || [];
+    if (ids.length === 0) {
+      console.log(`⚠️ Nessun utente trovato per "${searchTerm}".`);
       return null;
     }
-    
-    const exactMatch = users.find(u => 
-      u.username && u.username.toLowerCase() === searchTerm.toLowerCase()
-    );
-    
-    if (exactMatch) {
-      console.log(`✅ Trovato utente esatto: ${exactMatch.username} (ID: ${exactMatch._id})`);
-      return exactMatch._id;
-    }
-    
-    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${users[0].username}`);
-    return users[0]._id;
-    
+    console.log(`✅ Trovato utente per "${searchTerm}": ${ids[0]}`);
+    return ids[0];
   } catch (err) {
     console.error('❌ Errore nella ricerca utente:', err);
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] ERRORE ricerca: "${searchTerm}"\n${err.message}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
     return null;
   }
 }
 
 async function findMuIdByName(searchTerm) {
   try {
-    const results = await warera.raw('search.searchAnything', { query: searchTerm });
-    
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] Ricerca MU: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
-    
-    const mus = results.mus || [];
-    if (mus.length === 0) {
-      console.log(`⚠️ Nessuna MU trovata per "${searchTerm}"`);
+    const results = await warera.raw('search.searchAnything', { searchText: searchTerm });
+    const ids = results.muIds || [];
+    if (ids.length === 0) {
+      console.log(`⚠️ Nessuna MU trovata per "${searchTerm}".`);
       return null;
     }
-    
-    const exactMatch = mus.find(m => 
-      m.name && m.name.toLowerCase() === searchTerm.toLowerCase()
-    );
-    
-    if (exactMatch) {
-      console.log(`✅ Trovata MU esatta: ${exactMatch.name} (ID: ${exactMatch._id})`);
-      return exactMatch._id;
-    }
-    
-    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${mus[0].name}`);
-    return mus[0]._id;
-    
+    console.log(`✅ Trovata MU per "${searchTerm}": ${ids[0]}`);
+    return ids[0];
   } catch (err) {
     console.error('❌ Errore nella ricerca MU:', err);
     return null;
@@ -175,30 +140,14 @@ async function findMuIdByName(searchTerm) {
 
 async function findRegionIdByName(searchTerm) {
   try {
-    const results = await warera.raw('search.searchAnything', { query: searchTerm });
-    
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] Ricerca REGIONE: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
-    
-    const regions = results.regions || [];
-    if (regions.length === 0) {
-      console.log(`⚠️ Nessuna regione trovata per "${searchTerm}"`);
+    const results = await warera.raw('search.searchAnything', { searchText: searchTerm });
+    const ids = results.regionIds || [];
+    if (ids.length === 0) {
+      console.log(`⚠️ Nessuna regione trovata per "${searchTerm}".`);
       return null;
     }
-    
-    const exactMatch = regions.find(r => 
-      r.name && r.name.toLowerCase() === searchTerm.toLowerCase()
-    );
-    
-    if (exactMatch) {
-      console.log(`✅ Trovata regione esatta: ${exactMatch.name} (ID: ${exactMatch._id})`);
-      return exactMatch._id;
-    }
-    
-    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${regions[0].name}`);
-    return regions[0]._id;
-    
+    console.log(`✅ Trovata regione per "${searchTerm}": ${ids[0]}`);
+    return ids[0];
   } catch (err) {
     console.error('❌ Errore nella ricerca regione:', err);
     return null;
