@@ -75,6 +75,29 @@ function formatSkillGroup(skills, group) {
     .join('\n');
 }
 
+const ITEM_NAMES_IT = {
+  steel: 'Acciaio',
+  iron: 'Ferro',
+  oil: 'Petrolio',
+  lithium: 'Litio',
+  aluminum: 'Alluminio',
+  wood: 'Legno',
+  stone: 'Pietra',
+  food: 'Cibo',
+  wheat: 'Grano',
+  fish: 'Pesce',
+  water: 'Acqua',
+  coal: 'Carbone',
+  weapons: 'Armi',
+  ammo: 'Munizioni',
+  fuel: 'Carburante',
+};
+
+function itemNameIt(code) {
+  if (!code) return 'n/d';
+  return ITEM_NAMES_IT[code] ?? code.charAt(0).toUpperCase() + code.slice(1);
+}
+
 function numberFmt(n) {
   if (typeof n !== 'number' || Number.isNaN(n)) return 'n/d';
   const abs = Math.abs(n);
@@ -554,7 +577,7 @@ client.on('interactionCreate', async (interaction) => {
               `**Min. Economia:** ${ministroEconomia}`,
           },
           { name: '⚖️ Etiche del partito', value: ethicsText },
-          { name: '🏭 Specializzazione', value: String(country.specializedItem ?? 'n/d'), inline: true },
+          { name: '🏭 Specializzazione', value: itemNameIt(country.specializedItem), inline: true },
           { name: '📈 Bonus produzione', value: `${country.strategicResources?.bonuses?.productionPercent ?? 0}%`, inline: true },
           {
             name: '💰 Tassazione',
@@ -594,6 +617,34 @@ client.on('interactionCreate', async (interaction) => {
           user.mu ? warera.getMuById(user.mu).then((m) => m?.name ?? user.mu).catch(() => user.mu) : 'Nessuna',
         ]);
 
+        // Aziende: prima l'elenco degli ID, poi i dettagli di ciascuna
+        // (massimo 12 aziende per giocatore nel gioco).
+        let aziendeText = 'Nessuna azienda';
+        try {
+          const companiesList = await warera.getCompaniesByUserId(userId, 20);
+          const companyIds = (companiesList.items ?? []).slice(0, 12);
+          if (companyIds.length > 0) {
+            const companies = await Promise.all(
+              companyIds.map((id) => warera.getCompanyById(id).catch(() => null)),
+            );
+            aziendeText = companies
+              .filter(Boolean)
+              .map((c) => {
+                const lvl = c.activeUpgradeLevels ?? {};
+                const produzione = typeof c.production === 'number' ? c.production.toFixed(2) : 'n/d';
+                return (
+                  `**${itemNameIt(c.itemCode) ?? c.name ?? 'n/d'}** — ` +
+                  `Produzione disponibile: ${produzione}, Magazzino Lv${lvl.storage ?? 0}, Automazione Lv${lvl.automatedEngine ?? 0}, ` +
+                  `Dipendenti: ${c.workerCount ?? 0}`
+                );
+              })
+              .join('\n');
+            if (!aziendeText) aziendeText = 'Nessuna azienda';
+          }
+        } catch {
+          aziendeText = 'n/d (errore nel recupero)';
+        }
+
         const r = user.rankings ?? {};
         const embed = new EmbedBuilder()
           .setTitle(`🪖 ${user.username ?? userId}`)
@@ -608,7 +659,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: '💥 Danni totali', value: numberFmt(r.userDamages?.value), inline: true },
             { name: '⚔️ Abilità di combattimento', value: formatSkillGroup(user.skills, COMBAT_SKILLS) },
             { name: '💼 Abilità economiche', value: formatSkillGroup(user.skills, ECONOMIC_SKILLS) },
-            { name: '🏭 Aziende', value: 'Non disponibile pubblicamente via API (dato privato)' },
+            { name: '🏭 Aziende', value: aziendeText },
           )
           .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${userId}` });
           
