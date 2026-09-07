@@ -109,7 +109,6 @@ async function findUserIdByName(searchTerm) {
   try {
     const results = await warera.raw('search.searchAnything', { query: searchTerm });
     
-    // DEBUG: scrive i risultati in un file per controllare
     const debugPath = './debug_search.log';
     const debugContent = `[${new Date().toISOString()}] Ricerca: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
     fs.appendFileSync(debugPath, debugContent);
@@ -117,14 +116,10 @@ async function findUserIdByName(searchTerm) {
     
     const users = results.users || [];
     if (users.length === 0) {
-      // Prova una ricerca case-insensitive manuale (a volte l'API è case-sensitive)
-      // In realtà l'API dovrebbe essere case-insensitive, ma proviamo a cercare tra tutti
-      // gli utenti che l'API ha restituito (se ce ne sono)
       console.log(`⚠️ Nessun utente trovato per "${searchTerm}" nei risultati.`);
       return null;
     }
     
-    // Cerca match esatto (case-insensitive)
     const exactMatch = users.find(u => 
       u.username && u.username.toLowerCase() === searchTerm.toLowerCase()
     );
@@ -134,13 +129,11 @@ async function findUserIdByName(searchTerm) {
       return exactMatch._id;
     }
     
-    // Se non c'è match esatto, prendi il primo risultato
     console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${users[0].username}`);
     return users[0]._id;
     
   } catch (err) {
     console.error('❌ Errore nella ricerca utente:', err);
-    // Scrivi l'errore nel file di debug
     const debugPath = './debug_search.log';
     const debugContent = `[${new Date().toISOString()}] ERRORE ricerca: "${searchTerm}"\n${err.message}\n\n`;
     fs.appendFileSync(debugPath, debugContent);
@@ -529,11 +522,14 @@ async function sendAutomaticReport() {
 client.once('ready', () => {
   console.log(`✅ Bot connesso come ${client.user.tag}`);
 
+  // --- Programma il report giornaliero alle 9:00 (UNA SOLA VOLTA) con fuso orario ITALIANO ---
   if (REPORT_CHANNEL_ID && MU_ID) {
     cron.schedule('0 9 * * *', async () => {
       await sendAutomaticReport();
+    }, {
+      timezone: 'Europe/Rome'  // Imposta il fuso orario italiano
     });
-    console.log('⏰ Report automatico programmato per le 9:00 ogni giorno');
+    console.log('⏰ Report automatico programmato per le 9:00 ogni giorno (fuso orario: Europe/Rome)');
   } else {
     console.warn('⚠️ Report automatico NON programmato: mancano REPORT_CHANNEL_ID o MU_ID');
   }
