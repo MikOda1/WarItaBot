@@ -759,6 +759,7 @@ client.on('interactionCreate', async (interaction) => {
         ]);
 
         const bunker = region.activeUpgradeLevels?.bunker ?? 0;
+        const baseLevel = region.activeUpgradeLevels?.base ?? 0;
 
         const embed = new EmbedBuilder()
           .setTitle(`🗺️ ${region.name}`)
@@ -767,7 +768,10 @@ client.on('interactionCreate', async (interaction) => {
             { name: '🏳️ Nazione di appartenenza', value: nazioneOriginale, inline: true },
             { name: '🚩 Nazione attuale', value: nazioneAttuale, inline: true },
             { name: '🛡️ Bunker', value: `Livello ${bunker} — ${bunker > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
-            { name: '🎖️ Base Militare', value: 'Non ancora individuata via API pubblica (usa /warera-raw per riprovare)' },
+            {
+              name: '🎖️ Base Militare',
+              value: `Livello ${baseLevel} — ${baseLevel > 0 ? 'Attiva ✅' : 'Non attiva ❌'}`,
+            },
           )
           .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${regionId}` });
 
