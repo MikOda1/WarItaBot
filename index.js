@@ -631,10 +631,10 @@ client.on('interactionCreate', async (interaction) => {
               .filter(Boolean)
               .map((c) => {
                 const lvl = c.activeUpgradeLevels ?? {};
-                const produzione = typeof c.production === 'number' ? c.production.toFixed(2) : 'n/d';
+                const stato = c.disabledAt ? 'Disabilitata ❌' : 'Attiva ✅';
                 return (
-                  `**${itemNameIt(c.itemCode) ?? c.name ?? 'n/d'}** — ` +
-                  `Produzione disponibile: ${produzione}, Magazzino Lv${lvl.storage ?? 0}, Automazione Lv${lvl.automatedEngine ?? 0}, ` +
+                  `**${itemNameIt(c.itemCode) ?? c.name ?? 'n/d'}** — ${stato}\n` +
+                  `Magazzino Lv${lvl.storage ?? 0}, Automazione Lv${lvl.automatedEngine ?? 0}, ` +
                   `Dipendenti: ${c.workerCount ?? 0}`
                 );
               })
