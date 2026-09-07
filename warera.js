@@ -94,8 +94,11 @@ const warera = {
     callEndpoint('article.getArticlesPaginated', { limit }),
 
   // Aziende di un giocatore: endpoint POST, con paginazione (perPage/cursor).
+  // Restituisce solo gli ID; per i dettagli serve una seconda chiamata GET.
   getCompaniesByUserId: (userId, perPage = 50, cursor) =>
     postEndpoint('company.getCompanies', { userId, perPage, ...(cursor ? { cursor } : {}) }),
+
+  getCompanyById: (companyId) => callEndpoint('company.getById', { companyId }),
 };
 
 module.exports = warera;
