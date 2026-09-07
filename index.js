@@ -8,6 +8,8 @@ const {
   REST,
   Routes,
 } = require('discord.js');
+const cron = require('node-cron');
+const fs = require('fs');
 const warera = require('./warera');
 
 const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID } = process.env;
@@ -101,6 +103,242 @@ async function resolveCountryName(countryId) {
   }
 }
 
+// --- Funzioni di ricerca ROBUSTE (con debug) ---
+
+async function findUserIdByName(searchTerm) {
+  try {
+    const results = await warera.raw('search.searchAnything', { query: searchTerm });
+    
+    // DEBUG: scrive i risultati in un file per controllare
+    const debugPath = './debug_search.log';
+    const debugContent = `[${new Date().toISOString()}] Ricerca: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
+    fs.appendFileSync(debugPath, debugContent);
+    console.log(`🔍 Debug ricerca salvato in debug_search.log per "${searchTerm}"`);
+    
+    const users = results.users || [];
+    if (users.length === 0) {
+      // Prova una ricerca case-insensitive manuale (a volte l'API è case-sensitive)
+      // In realtà l'API dovrebbe essere case-insensitive, ma proviamo a cercare tra tutti
+      // gli utenti che l'API ha restituito (se ce ne sono)
+      console.log(`⚠️ Nessun utente trovato per "${searchTerm}" nei risultati.`);
+      return null;
+    }
+    
+    // Cerca match esatto (case-insensitive)
+    const exactMatch = users.find(u => 
+      u.username && u.username.toLowerCase() === searchTerm.toLowerCase()
+    );
+    
+    if (exactMatch) {
+      console.log(`✅ Trovato utente esatto: ${exactMatch.username} (ID: ${exactMatch._id})`);
+      return exactMatch._id;
+    }
+    
+    // Se non c'è match esatto, prendi il primo risultato
+    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${users[0].username}`);
+    return users[0]._id;
+    
+  } catch (err) {
+    console.error('❌ Errore nella ricerca utente:', err);
+    // Scrivi l'errore nel file di debug
+    const debugPath = './debug_search.log';
+    const debugContent = `[${new Date().toISOString()}] ERRORE ricerca: "${searchTerm}"\n${err.message}\n\n`;
+    fs.appendFileSync(debugPath, debugContent);
+    return null;
+  }
+}
+
+async function findMuIdByName(searchTerm) {
+  try {
+    const results = await warera.raw('search.searchAnything', { query: searchTerm });
+    
+    const debugPath = './debug_search.log';
+    const debugContent = `[${new Date().toISOString()}] Ricerca MU: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
+    fs.appendFileSync(debugPath, debugContent);
+    
+    const mus = results.mus || [];
+    if (mus.length === 0) {
+      console.log(`⚠️ Nessuna MU trovata per "${searchTerm}"`);
+      return null;
+    }
+    
+    const exactMatch = mus.find(m => 
+      m.name && m.name.toLowerCase() === searchTerm.toLowerCase()
+    );
+    
+    if (exactMatch) {
+      console.log(`✅ Trovata MU esatta: ${exactMatch.name} (ID: ${exactMatch._id})`);
+      return exactMatch._id;
+    }
+    
+    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${mus[0].name}`);
+    return mus[0]._id;
+    
+  } catch (err) {
+    console.error('❌ Errore nella ricerca MU:', err);
+    return null;
+  }
+}
+
+async function findRegionIdByName(searchTerm) {
+  try {
+    const results = await warera.raw('search.searchAnything', { query: searchTerm });
+    
+    const debugPath = './debug_search.log';
+    const debugContent = `[${new Date().toISOString()}] Ricerca REGIONE: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
+    fs.appendFileSync(debugPath, debugContent);
+    
+    const regions = results.regions || [];
+    if (regions.length === 0) {
+      console.log(`⚠️ Nessuna regione trovata per "${searchTerm}"`);
+      return null;
+    }
+    
+    const exactMatch = regions.find(r => 
+      r.name && r.name.toLowerCase() === searchTerm.toLowerCase()
+    );
+    
+    if (exactMatch) {
+      console.log(`✅ Trovata regione esatta: ${exactMatch.name} (ID: ${exactMatch._id})`);
+      return exactMatch._id;
+    }
+    
+    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${regions[0].name}`);
+    return regions[0]._id;
+    
+  } catch (err) {
+    console.error('❌ Errore nella ricerca regione:', err);
+    return null;
+  }
+}
+
+// --- Funzione per costruire l'embed del report MU (riutilizzabile) ---------
+
+async function buildMuReportEmbed(muId, isAutomatic = false) {
+  let mu;
+  try {
+    mu = await warera.getMuById(muId);
+  } catch (err) {
+    throw new Error(`Impossibile recuperare la MU con ID ${muId}. Verifica che l'ID sia corretto.`);
+  }
+
+  const nazioneMu = await resolveCountryName(mu.country);
+  const memberIds = mu.members ?? [];
+  const members = [];
+  let errorCount = 0;
+
+  for (const memberId of memberIds) {
+    try {
+      const u = await warera.getUserLite(memberId);
+      members.push({
+        username: u.username ?? memberId,
+        weeklyDamage: u.rankings?.weeklyUserDamages?.value ?? null,
+        totalDamage: u.rankings?.userDamages?.value ?? null,
+        wealth: u.rankings?.userWealth?.value ?? null,
+      });
+    } catch (err) {
+      console.warn(`Impossibile recuperare i dati per l'utente ${memberId}:`, err.message);
+      members.push({
+        username: memberId,
+        weeklyDamage: null,
+        totalDamage: null,
+        wealth: null,
+      });
+      errorCount++;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  const errorMessage = errorCount > 0 ? `\n⚠️ ${errorCount} membro/i non recuperato/i correttamente.` : '';
+
+  members.sort((a, b) => a.username.localeCompare(b.username, 'it', { sensitivity: 'base' }));
+
+  const memberList = members.map(m => {
+    const weekly = m.weeklyDamage !== null ? numberFmt(m.weeklyDamage) : 'n/d';
+    const total = m.totalDamage !== null ? numberFmt(m.totalDamage) : 'n/d';
+    const wealth = m.wealth !== null ? numberFmt(m.wealth) : 'n/d';
+    return `• **${m.username}**  (Sett: ${weekly} | Tot: ${total} | Ricch: ${wealth})`;
+  }).join('\n');
+
+  const MAX_FIELD_VALUE = 1024;
+  const memberFields = [];
+
+  if (!memberList || memberList.length === 0) {
+    memberFields.push({
+      name: '📋 Membri',
+      value: 'Nessun membro trovato in questa MU.',
+    });
+  } else if (memberList.length <= MAX_FIELD_VALUE) {
+    memberFields.push({
+      name: '📋 Membri (ordine alfabetico)',
+      value: memberList,
+    });
+  } else {
+    const lines = memberList.split('\n');
+    let currentChunk = '';
+    let chunkCount = 1;
+
+    for (const line of lines) {
+      if ((currentChunk + '\n' + line).length <= MAX_FIELD_VALUE) {
+        currentChunk += (currentChunk ? '\n' : '') + line;
+      } else {
+        memberFields.push({
+          name: chunkCount === 1 ? '📋 Membri (ordine alfabetico)' : '\u200b',
+          value: currentChunk,
+        });
+        currentChunk = line;
+        chunkCount++;
+      }
+    }
+    if (currentChunk) {
+      memberFields.push({
+        name: '\u200b',
+        value: currentChunk,
+      });
+    }
+  }
+
+  const hq = mu.activeUpgradeLevels?.headquarters ?? 0;
+  const dorm = mu.activeUpgradeLevels?.dormitories ?? 0;
+  const r = mu.rankings ?? {};
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🛡️ ${mu.name}`)
+    .setColor(0xd69e2e)
+    .setThumbnail(mu.avatarUrl ?? null)
+    .addFields(
+      { name: '👥 Membri', value: numberFmt(memberIds.length), inline: true },
+      { name: '🌍 Nazionalità', value: nazioneMu, inline: true },
+      { name: '🤝 Reputazione mercenaria', value: mu.mercenaryReputation != null ? mu.mercenaryReputation.toFixed(2) : 'n/d', inline: true },
+      { name: '💥 Danni settimanali MU', value: numberFmt(r.muWeeklyDamages?.value), inline: true },
+      { name: '💥 Danni totali MU', value: numberFmt(r.muDamages?.value), inline: true },
+      { name: '\u200b', value: '\u200b', inline: true },
+      { name: '🏢 Quartier generale', value: `Livello ${hq} — ${hq > 0 ? 'Attivo ✅' : 'Non attivo ❌'}`, inline: true },
+      { name: '🛌 Dormitori', value: `Livello ${dorm} — ${dorm > 0 ? 'Attivi ✅' : 'Non attivi ❌'}`, inline: true },
+      ...memberFields,
+    )
+    .setFooter({ text: `${isAutomatic ? 'Report automatico' : 'Generato'} il ${new Date().toLocaleString('it-IT')}${errorMessage}` });
+
+  return { embed, members, mu };
+}
+
+// --- Funzione helper per convertire date GG-MM-AAAA <-> YYYY-MM-DD ---
+function parseItalianDate(dateStr) {
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return null;
+  const day = parseInt(parts[0], 10);
+  const month = parseInt(parts[1], 10);
+  const year = parseInt(parts[2], 10);
+  if (isNaN(day) || isNaN(month) || isNaN(year)) return null;
+  return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+}
+
+function formatItalianDate(isoDate) {
+  const parts = isoDate.split('-');
+  if (parts.length !== 3) return isoDate;
+  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+}
+
 // --- 1. Definizione degli slash command -------------------------------------
 
 const commands = [
@@ -117,30 +355,36 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('warera-user')
-    .setDescription('Scheda profilo di un giocatore')
+    .setDescription('Scheda profilo di un giocatore (cerca per ID o nome)')
     .addStringOption((opt) =>
-      opt.setName('id').setDescription('ID utente WarEra (dalla URL del profilo)').setRequired(true),
+      opt.setName('cerca')
+        .setDescription('ID utente OPPURE nome del giocatore')
+        .setRequired(true),
     ),
 
   new SlashCommandBuilder()
     .setName('warera-mu')
-    .setDescription('Scheda riassuntiva di una MU (unità militare)')
+    .setDescription('Scheda riassuntiva di una MU (cerca per ID o nome)')
     .addStringOption((opt) =>
-      opt.setName('id').setDescription('ID della MU (dalla URL della MU)').setRequired(true),
+      opt.setName('cerca')
+        .setDescription('ID MU OPPURE nome della MU')
+        .setRequired(true),
     ),
 
   new SlashCommandBuilder()
     .setName('warera-mu-report')
-    .setDescription('Esporta un report Excel della MU con le statistiche di tutti i membri')
+    .setDescription('Mostra il report completo della MU con le statistiche di tutti i membri')
     .addStringOption((opt) =>
       opt.setName('id').setDescription('ID della MU (dalla URL della MU)').setRequired(true),
     ),
 
   new SlashCommandBuilder()
     .setName('warera-region')
-    .setDescription('Scheda riassuntiva di una regione')
+    .setDescription('Scheda riassuntiva di una regione (cerca per ID o nome)')
     .addStringOption((opt) =>
-      opt.setName('id').setDescription('ID della regione (dalla URL della regione)').setRequired(true),
+      opt.setName('cerca')
+        .setDescription('ID regione OPPURE nome della regione')
+        .setRequired(true),
     ),
 
   new SlashCommandBuilder()
@@ -168,6 +412,33 @@ const commands = [
         .setDescription('Path del campo da isolare, es. "rankings". Vuoto = elenco chiavi.')
         .setRequired(false),
     ),
+
+  new SlashCommandBuilder()
+    .setName('report')
+    .setDescription('Invia manualmente il report della MU configurata (MOSTRA TUTTI I MEMBRI)'),
+
+  new SlashCommandBuilder()
+    .setName('confronta')
+    .setDescription('Confronta due report salvati di giorni diversi')
+    .addStringOption((opt) =>
+      opt.setName('data1')
+        .setDescription('Prima data (formato GG-MM-AAAA, es. 07-09-2026)')
+        .setRequired(true),
+    )
+    .addStringOption((opt) =>
+      opt.setName('data2')
+        .setDescription('Seconda data (formato GG-MM-AAAA, es. 08-09-2026)')
+        .setRequired(true),
+    ),
+
+  new SlashCommandBuilder()
+    .setName('forza-report')
+    .setDescription('[TEST] Salva manualmente un report per una data specifica')
+    .addStringOption((opt) =>
+      opt.setName('data')
+        .setDescription('Data nel formato GG-MM-AAAA (es. 06-09-2026)')
+        .setRequired(true),
+    ),
 ].map((c) => c.toJSON());
 
 // --- 2. Registrazione dei comandi su Discord --------------------------------
@@ -186,10 +457,89 @@ async function registerCommands() {
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// ------------------- VARIABILI PER IL REPORT AUTOMATICO -------------------
+const REPORT_CHANNEL_ID = process.env.REPORT_CHANNEL_ID;
+const MU_ID = process.env.MU_ID;
+
+// ------------------- FUNZIONE PER INVIARE IL REPORT (AUTOMATICO) ---------
+async function sendAutomaticReport() {
+  if (!REPORT_CHANNEL_ID) {
+    console.error('❌ REPORT_CHANNEL_ID non configurato!');
+    return;
+  }
+  if (!MU_ID) {
+    console.error('❌ MU_ID non configurato!');
+    return;
+  }
+
+  try {
+    const channel = client.channels.cache.get(REPORT_CHANNEL_ID);
+    if (!channel) {
+      console.error(`❌ Canale ${REPORT_CHANNEL_ID} non trovato!`);
+      return;
+    }
+
+    console.log('⏰ Generazione report automatico delle 9:00...');
+    const { embed, members, mu } = await buildMuReportEmbed(MU_ID, true);
+    
+    const reportData = {
+      date: new Date().toISOString().split('T')[0],
+      timestamp: new Date().toISOString(),
+      mu: {
+        id: MU_ID,
+        name: mu.name,
+        country: mu.country,
+        memberCount: mu.members?.length || 0,
+        weeklyDamage: mu.rankings?.muWeeklyDamages?.value || 0,
+        totalDamage: mu.rankings?.muDamages?.value || 0,
+        reputation: mu.mercenaryReputation || 0,
+      },
+      members: members.map(m => ({
+        username: m.username,
+        weeklyDamage: m.weeklyDamage,
+        totalDamage: m.totalDamage,
+        wealth: m.wealth,
+      }))
+    };
+
+    const reportsPath = './reports.json';
+    let reports = [];
+    if (fs.existsSync(reportsPath)) {
+      const content = fs.readFileSync(reportsPath, 'utf8');
+      reports = JSON.parse(content);
+    }
+    
+    const existingIndex = reports.findIndex(r => r.date === reportData.date);
+    if (existingIndex >= 0) {
+      reports[existingIndex] = reportData;
+    } else {
+      reports.push(reportData);
+    }
+    fs.writeFileSync(reportsPath, JSON.stringify(reports, null, 2));
+
+    await channel.send({ embeds: [embed] });
+    console.log(`✅ Report automatico inviato e salvato per il ${reportData.date}`);
+
+  } catch (error) {
+    console.error('❌ Errore nel report automatico:', error);
+  }
+}
+
+// ------------------- QUANDO IL BOT È PRONTO --------------------------------
 client.once('ready', () => {
-  console.log(`Bot connesso come ${client.user.tag}`);
+  console.log(`✅ Bot connesso come ${client.user.tag}`);
+
+  if (REPORT_CHANNEL_ID && MU_ID) {
+    cron.schedule('0 9 * * *', async () => {
+      await sendAutomaticReport();
+    });
+    console.log('⏰ Report automatico programmato per le 9:00 ogni giorno');
+  } else {
+    console.warn('⚠️ Report automatico NON programmato: mancano REPORT_CHANNEL_ID o MU_ID');
+  }
 });
 
+// ------------------- GESTIONE DEI COMANDI SLASH ----------------------------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -268,219 +618,164 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply({ embeds: [embed] });
     }
 
-    // --- /warera-user -------------------------------------------------------
+    // --- /warera-user (cerca per ID o nome) ------------------------------
     if (interaction.commandName === 'warera-user') {
       await interaction.deferReply();
-      const id = interaction.options.getString('id');
-      const user = await warera.getUserLite(id);
+      const searchTerm = interaction.options.getString('cerca');
+      
+      const isId = /^\d+$/.test(searchTerm);
+      let userId = searchTerm;
+      let usedName = null;
+      
+      if (!isId) {
+        const foundId = await findUserIdByName(searchTerm);
+        if (!foundId) {
+          await interaction.editReply(`❌ Nessun giocatore trovato con il nome "${searchTerm}".\n📌 Se il nome contiene caratteri speciali (es. _), prova con l'ID.`);
+          return;
+        }
+        userId = foundId;
+        usedName = searchTerm;
+      }
+      
+      try {
+        const user = await warera.getUserLite(userId);
+        
+        const [nazione, muNome] = await Promise.all([
+          resolveCountryName(user.country),
+          user.mu ? warera.getMuById(user.mu).then((m) => m?.name ?? user.mu).catch(() => user.mu) : 'Nessuna',
+        ]);
 
-      const [nazione, muNome] = await Promise.all([
-        resolveCountryName(user.country),
-        user.mu ? warera.getMuById(user.mu).then((m) => m?.name ?? user.mu).catch(() => user.mu) : 'Nessuna',
-      ]);
-
-      const r = user.rankings ?? {};
-      const embed = new EmbedBuilder()
-        .setTitle(`🪖 ${user.username ?? id}`)
-        .setColor(0x38a169)
-        .setThumbnail(user.avatarUrl ?? null)
-        .addFields(
-          { name: '🌍 Nazionalità', value: nazione, inline: true },
-          { name: '⚔️ MU', value: muNome, inline: true },
-          { name: '⭐ Livello', value: numberFmt(user.leveling?.level), inline: true },
-          { name: '💰 Ricchezza totale', value: numberFmt(r.userWealth?.value), inline: true },
-          { name: '💥 Danni settimanali', value: numberFmt(r.weeklyUserDamages?.value), inline: true },
-          { name: '💥 Danni totali', value: numberFmt(r.userDamages?.value), inline: true },
-          { name: '⚔️ Abilità di combattimento', value: formatSkillGroup(user.skills, COMBAT_SKILLS) },
-          { name: '💼 Abilità economiche', value: formatSkillGroup(user.skills, ECONOMIC_SKILLS) },
-          { name: '🏭 Aziende', value: 'Non disponibile pubblicamente via API (dato privato)' },
-        );
-      await interaction.editReply({ embeds: [embed] });
+        const r = user.rankings ?? {};
+        const embed = new EmbedBuilder()
+          .setTitle(`🪖 ${user.username ?? userId}`)
+          .setColor(0x38a169)
+          .setThumbnail(user.avatarUrl ?? null)
+          .addFields(
+            { name: '🌍 Nazionalità', value: nazione, inline: true },
+            { name: '⚔️ MU', value: muNome, inline: true },
+            { name: '⭐ Livello', value: numberFmt(user.leveling?.level), inline: true },
+            { name: '💰 Ricchezza totale', value: numberFmt(r.userWealth?.value), inline: true },
+            { name: '💥 Danni settimanali', value: numberFmt(r.weeklyUserDamages?.value), inline: true },
+            { name: '💥 Danni totali', value: numberFmt(r.userDamages?.value), inline: true },
+            { name: '⚔️ Abilità di combattimento', value: formatSkillGroup(user.skills, COMBAT_SKILLS) },
+            { name: '💼 Abilità economiche', value: formatSkillGroup(user.skills, ECONOMIC_SKILLS) },
+            { name: '🏭 Aziende', value: 'Non disponibile pubblicamente via API (dato privato)' },
+          )
+          .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${userId}` });
+          
+        await interaction.editReply({ embeds: [embed] });
+      } catch (error) {
+        console.error(error);
+        await interaction.editReply(`❌ Errore nel recuperare i dati. Verifica che ${isId ? 'l\'ID' : 'il nome'} sia corretto.`);
+      }
     }
 
-    // --- /warera-mu -----------------------------------------------------
+    // --- /warera-mu (cerca per ID o nome) --------------------------------
     if (interaction.commandName === 'warera-mu') {
       await interaction.deferReply();
-      const id = interaction.options.getString('id');
-      const mu = await warera.getMuById(id);
-      const nazione = await resolveCountryName(mu.country);
+      const searchTerm = interaction.options.getString('cerca');
+      
+      const isId = /^\d+$/.test(searchTerm);
+      let muId = searchTerm;
+      let usedName = null;
+      
+      if (!isId) {
+        const foundId = await findMuIdByName(searchTerm);
+        if (!foundId) {
+          await interaction.editReply(`❌ Nessuna MU trovata con il nome "${searchTerm}".\n📌 Se il nome contiene caratteri speciali, prova con l'ID.`);
+          return;
+        }
+        muId = foundId;
+        usedName = searchTerm;
+      }
+      
+      try {
+        const mu = await warera.getMuById(muId);
+        const nazione = await resolveCountryName(mu.country);
 
-      const r = mu.rankings ?? {};
-      const hq = mu.activeUpgradeLevels?.headquarters ?? 0;
-      const dorm = mu.activeUpgradeLevels?.dormitories ?? 0;
+        const r = mu.rankings ?? {};
+        const hq = mu.activeUpgradeLevels?.headquarters ?? 0;
+        const dorm = mu.activeUpgradeLevels?.dormitories ?? 0;
 
-      const embed = new EmbedBuilder()
-        .setTitle(`🛡️ ${mu.name}`)
-        .setColor(0xd69e2e)
-        .setThumbnail(mu.avatarUrl ?? null)
-        .addFields(
-          { name: '👥 Membri', value: numberFmt(mu.members?.length), inline: true },
-          { name: '🌍 Nazionalità', value: nazione, inline: true },
-          { name: '🤝 Reputazione mercenaria', value: mu.mercenaryReputation != null ? mu.mercenaryReputation.toFixed(2) : 'n/d', inline: true },
-          { name: '💥 Danni settimanali', value: numberFmt(r.muWeeklyDamages?.value), inline: true },
-          { name: '💥 Danni totali', value: numberFmt(r.muDamages?.value), inline: true },
-          { name: '🏢 Quartier generale', value: `Livello ${hq} — ${hq > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
-          { name: '🛌 Dormitori', value: `Livello ${dorm} — ${dorm > 0 ? 'Attivi ✅' : 'Non attivi ❌'}` },
-        );
-      await interaction.editReply({ embeds: [embed] });
+        const embed = new EmbedBuilder()
+          .setTitle(`🛡️ ${mu.name}`)
+          .setColor(0xd69e2e)
+          .setThumbnail(mu.avatarUrl ?? null)
+          .addFields(
+            { name: '👥 Membri', value: numberFmt(mu.members?.length), inline: true },
+            { name: '🌍 Nazionalità', value: nazione, inline: true },
+            { name: '🤝 Reputazione mercenaria', value: mu.mercenaryReputation != null ? mu.mercenaryReputation.toFixed(2) : 'n/d', inline: true },
+            { name: '💥 Danni settimanali', value: numberFmt(r.muWeeklyDamages?.value), inline: true },
+            { name: '💥 Danni totali', value: numberFmt(r.muDamages?.value), inline: true },
+            { name: '🏢 Quartier generale', value: `Livello ${hq} — ${hq > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
+            { name: '🛌 Dormitori', value: `Livello ${dorm} — ${dorm > 0 ? 'Attivi ✅' : 'Non attivi ❌'}` },
+          )
+          .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${muId}` });
+
+        await interaction.editReply({ embeds: [embed] });
+      } catch (error) {
+        console.error(error);
+        await interaction.editReply(`❌ Errore nel recuperare i dati. Verifica che ${isId ? 'l\'ID' : 'il nome'} sia corretto.`);
+      }
     }
 
-    // --- /warera-mu-report (riepilogo embed) ------------------------------
+    // --- /warera-mu-report ----------------------------------------------
     if (interaction.commandName === 'warera-mu-report') {
       await interaction.deferReply();
-
       const id = interaction.options.getString('id');
-
-      let mu;
       try {
-        mu = await warera.getMuById(id);
+        const { embed } = await buildMuReportEmbed(id, false);
+        await interaction.editReply({ embeds: [embed] });
       } catch (err) {
-        console.error(`Errore nel recuperare la MU ${id}:`, err.message);
-        await interaction.editReply(`❌ Impossibile recuperare la MU con ID \`${id}\`. Verifica che l'ID sia corretto e che la MU esista.`);
-        return;
+        await interaction.editReply(`❌ ${err.message}`);
       }
-
-      const nazioneMu = await resolveCountryName(mu.country);
-
-      // Recupero membri
-      const memberIds = mu.members ?? [];
-      const members = [];
-      let errorCount = 0;
-
-      for (const memberId of memberIds) {
-        try {
-          const u = await warera.getUserLite(memberId);
-          members.push({
-            username: u.username ?? memberId,
-            weeklyDamage: u.rankings?.weeklyUserDamages?.value ?? null,
-            totalDamage: u.rankings?.userDamages?.value ?? null,
-            wealth: u.rankings?.userWealth?.value ?? null,
-          });
-        } catch (err) {
-          console.warn(`Impossibile recuperare i dati per l'utente ${memberId}:`, err.message);
-          members.push({
-            username: memberId,
-            weeklyDamage: null,
-            totalDamage: null,
-            wealth: null,
-          });
-          errorCount++;
-        }
-        await new Promise((r) => setTimeout(r, 250));
-      }
-
-      const errorMessage = errorCount > 0 ? `\n⚠️ ${errorCount} membro/i non recuperato/i correttamente.` : '';
-
-      // Ordine alfabetico
-      members.sort((a, b) => a.username.localeCompare(b.username, 'it', { sensitivity: 'base' }));
-
-      // --- Costruzione tabella senza bordi, con nomi completi ---
-      const maxNameLen = Math.max(10, ...members.map(m => m.username.length));
-      const NAME_W = maxNameLen;
-      const VAL_W = 7;
-      const col = (s, len) => String(s).slice(0, len).padEnd(len, ' ');
-      const colR = (s, len) => String(s).slice(0, len).padStart(len, ' ');
-      const row = (name, v1, v2, v3) =>
-        `${col(name, NAME_W)}   ${colR(v1, VAL_W)}   ${colR(v2, VAL_W)}   ${colR(v3, VAL_W)}`;
-
-      const headerRow = row('Nome', 'Sett.', 'Tot.', 'Ricch.');
-      const separator = '-'.repeat(headerRow.length);
-
-      // --- Generazione campi embed rispettando il limite di 1024 caratteri ---
-      const MAX_FIELD_VALUE = 1024;
-      const memberFields = [];
-
-      // Funzione per ottenere il valore completo del campo (con backtick)
-      function getChunkValue(lines) {
-        return '```\n' + lines.join('\n') + '\n```';
-      }
-
-      // Inizia con intestazione e separatore
-      let currentLines = [headerRow, separator];
-      let currentLength = getChunkValue(currentLines).length;
-
-      for (const m of members) {
-        const line = row(m.username, numberFmt(m.weeklyDamage), numberFmt(m.totalDamage), numberFmt(m.wealth));
-        const potentialLines = currentLines.concat([line]);
-        const potentialValue = getChunkValue(potentialLines);
-
-        if (potentialValue.length <= MAX_FIELD_VALUE) {
-          currentLines.push(line);
-        } else {
-          // Salva il chunk corrente
-          memberFields.push({
-            name: memberFields.length === 0 ? '📋 Membri (ordine alfabetico)' : '\u200b',
-            value: getChunkValue(currentLines),
-          });
-          // Inizia nuovo chunk con intestazione, separatore e la riga corrente
-          currentLines = [headerRow, separator, line];
-        }
-      }
-
-      // Aggiungi l'ultimo chunk (se contiene almeno intestazione + separatore + almeno un membro)
-      if (currentLines.length > 2) {
-        memberFields.push({
-          name: memberFields.length === 0 ? '📋 Membri (ordine alfabetico)' : '\u200b',
-          value: getChunkValue(currentLines),
-        });
-      }
-
-      // Se non ci sono membri, mostra un messaggio
-      if (memberFields.length === 0) {
-        memberFields.push({
-          name: '📋 Membri',
-          value: 'Nessun membro trovato in questa MU.',
-        });
-      }
-
-      // --- Costruzione embed finale ---
-      const hq = mu.activeUpgradeLevels?.headquarters ?? 0;
-      const dorm = mu.activeUpgradeLevels?.dormitories ?? 0;
-      const r = mu.rankings ?? {};
-
-      const embed = new EmbedBuilder()
-        .setTitle(`🛡️ ${mu.name}`)
-        .setColor(0xd69e2e)
-        .setThumbnail(mu.avatarUrl ?? null)
-        .addFields(
-          { name: '👥 Membri', value: numberFmt(memberIds.length), inline: true },
-          { name: '🌍 Nazionalità', value: nazioneMu, inline: true },
-          { name: '🤝 Reputazione mercenaria', value: mu.mercenaryReputation != null ? mu.mercenaryReputation.toFixed(2) : 'n/d', inline: true },
-          { name: '💥 Danni settimanali MU', value: numberFmt(r.muWeeklyDamages?.value), inline: true },
-          { name: '💥 Danni totali MU', value: numberFmt(r.muDamages?.value), inline: true },
-          { name: '\u200b', value: '\u200b', inline: true },
-          { name: '🏢 Quartier generale', value: `Livello ${hq} — ${hq > 0 ? 'Attivo ✅' : 'Non attivo ❌'}`, inline: true },
-          { name: '🛌 Dormitori', value: `Livello ${dorm} — ${dorm > 0 ? 'Attivi ✅' : 'Non attivi ❌'}`, inline: true },
-          ...memberFields,
-        )
-        .setFooter({ text: `Generato il ${new Date().toLocaleString('it-IT')}${errorMessage}` });
-
-      await interaction.editReply({ embeds: [embed] });
     }
 
-    // --- /warera-region ---------------------------------------------------
+    // --- /warera-region (cerca per ID o nome) -----------------------------
     if (interaction.commandName === 'warera-region') {
       await interaction.deferReply();
-      const id = interaction.options.getString('id');
-      const region = await warera.getRegionById(id);
+      const searchTerm = interaction.options.getString('cerca');
+      
+      const isId = /^\d+$/.test(searchTerm);
+      let regionId = searchTerm;
+      let usedName = null;
+      
+      if (!isId) {
+        const foundId = await findRegionIdByName(searchTerm);
+        if (!foundId) {
+          await interaction.editReply(`❌ Nessuna regione trovata con il nome "${searchTerm}".\n📌 Se il nome contiene caratteri speciali, prova con l'ID.`);
+          return;
+        }
+        regionId = foundId;
+        usedName = searchTerm;
+      }
+      
+      try {
+        const region = await warera.getRegionById(regionId);
 
-      const [nazioneOriginale, nazioneAttuale] = await Promise.all([
-        resolveCountryName(region.initialCountry),
-        resolveCountryName(region.country),
-      ]);
+        const [nazioneOriginale, nazioneAttuale] = await Promise.all([
+          resolveCountryName(region.initialCountry),
+          resolveCountryName(region.country),
+        ]);
 
-      const bunker = region.activeUpgradeLevels?.bunker ?? 0;
+        const bunker = region.activeUpgradeLevels?.bunker ?? 0;
 
-      const embed = new EmbedBuilder()
-        .setTitle(`🗺️ ${region.name}`)
-        .setColor(0x805ad5)
-        .addFields(
-          { name: '🏳️ Nazione di appartenenza', value: nazioneOriginale, inline: true },
-          { name: '🚩 Nazione attuale', value: nazioneAttuale, inline: true },
-          { name: '🛡️ Bunker', value: `Livello ${bunker} — ${bunker > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
-          { name: '🎖️ Base Militare', value: 'Non ancora individuata via API pubblica (usa /warera-raw per riprovare)' },
-        );
-      await interaction.editReply({ embeds: [embed] });
+        const embed = new EmbedBuilder()
+          .setTitle(`🗺️ ${region.name}`)
+          .setColor(0x805ad5)
+          .addFields(
+            { name: '🏳️ Nazione di appartenenza', value: nazioneOriginale, inline: true },
+            { name: '🚩 Nazione attuale', value: nazioneAttuale, inline: true },
+            { name: '🛡️ Bunker', value: `Livello ${bunker} — ${bunker > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
+            { name: '🎖️ Base Militare', value: 'Non ancora individuata via API pubblica (usa /warera-raw per riprovare)' },
+          )
+          .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${regionId}` });
+
+        await interaction.editReply({ embeds: [embed] });
+      } catch (error) {
+        console.error(error);
+        await interaction.editReply(`❌ Errore nel recuperare i dati. Verifica che ${isId ? 'l\'ID' : 'il nome'} sia corretto.`);
+      }
     }
 
     // --- /warera-news -------------------------------------------------------
@@ -538,6 +833,250 @@ client.on('interactionCreate', async (interaction) => {
         output = '```\n' + json + '\n```';
       }
       await interaction.editReply(output);
+    }
+
+    // ------------------- COMANDO /REPORT (MANUALE) -------------------------
+    if (interaction.commandName === 'report') {
+      await interaction.deferReply({ ephemeral: true });
+
+      if (!MU_ID) {
+        await interaction.editReply('❌ MU_ID non configurato nelle variabili d\'ambiente!');
+        return;
+      }
+
+      try {
+        const { embed, members, mu } = await buildMuReportEmbed(MU_ID, false);
+        
+        const reportData = {
+          date: new Date().toISOString().split('T')[0],
+          timestamp: new Date().toISOString(),
+          mu: {
+            id: MU_ID,
+            name: mu.name,
+            country: mu.country,
+            memberCount: mu.members?.length || 0,
+            weeklyDamage: mu.rankings?.muWeeklyDamages?.value || 0,
+            totalDamage: mu.rankings?.muDamages?.value || 0,
+            reputation: mu.mercenaryReputation || 0,
+          },
+          members: members.map(m => ({
+            username: m.username,
+            weeklyDamage: m.weeklyDamage,
+            totalDamage: m.totalDamage,
+            wealth: m.wealth,
+          }))
+        };
+
+        const reportsPath = './reports.json';
+        let reports = [];
+        if (fs.existsSync(reportsPath)) {
+          const content = fs.readFileSync(reportsPath, 'utf8');
+          reports = JSON.parse(content);
+        }
+        
+        const existingIndex = reports.findIndex(r => r.date === reportData.date);
+        if (existingIndex >= 0) {
+          reports[existingIndex] = reportData;
+        } else {
+          reports.push(reportData);
+        }
+        fs.writeFileSync(reportsPath, JSON.stringify(reports, null, 2));
+
+        await interaction.channel.send({ embeds: [embed] });
+        await interaction.editReply('✅ Report inviato e salvato con successo!');
+      } catch (err) {
+        await interaction.editReply(`❌ ${err.message}`);
+      }
+    }
+
+    // ------------------- COMANDO /CONFRONTA (GG-MM-AAAA) ---------------------
+    if (interaction.commandName === 'confronta') {
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        const data1Input = interaction.options.getString('data1');
+        const data2Input = interaction.options.getString('data2');
+
+        const data1 = parseItalianDate(data1Input);
+        const data2 = parseItalianDate(data2Input);
+        if (!data1 || !data2) {
+          await interaction.editReply('❌ Formato data non valido. Usa GG-MM-AAAA (es. 07-09-2026)');
+          return;
+        }
+
+        const reportsPath = './reports.json';
+        if (!fs.existsSync(reportsPath)) {
+          await interaction.editReply('❌ Nessun report salvato! Usa `/report` per generare un report.');
+          return;
+        }
+
+        const content = fs.readFileSync(reportsPath, 'utf8');
+        const reports = JSON.parse(content);
+
+        if (reports.length === 0) {
+          await interaction.editReply('❌ Nessun report salvato! Usa `/report` per generare un report.');
+          return;
+        }
+
+        const report1 = reports.find(r => r.date === data1);
+        const report2 = reports.find(r => r.date === data2);
+
+        if (!report1) {
+          await interaction.editReply(`❌ Nessun report trovato per la data **${formatItalianDate(data1)}**.`);
+          return;
+        }
+        if (!report2) {
+          await interaction.editReply(`❌ Nessun report trovato per la data **${formatItalianDate(data2)}**.`);
+          return;
+        }
+
+        const mu1 = report1.mu;
+        const mu2 = report2.mu;
+        const members1 = report1.members || [];
+        const members2 = report2.members || [];
+
+        const usernames1 = new Set(members1.map(m => m.username));
+        const usernames2 = new Set(members2.map(m => m.username));
+
+        const newMembers = members2.filter(m => !usernames1.has(m.username));
+        const leftMembers = members1.filter(m => !usernames2.has(m.username));
+
+        const diff = {
+          members: mu2.memberCount - mu1.memberCount,
+          weeklyDamage: mu2.weeklyDamage - mu1.weeklyDamage,
+          totalDamage: mu2.totalDamage - mu1.totalDamage,
+          reputation: mu2.reputation - mu1.reputation,
+        };
+
+        const newList = newMembers.slice(0, 10).map(m => `• ${m.username}`).join('\n') || 'Nessuno';
+        const leftList = leftMembers.slice(0, 10).map(m => `• ${m.username}`).join('\n') || 'Nessuno';
+
+        const embed = new EmbedBuilder()
+          .setTitle(`📊 Confronto Report MU: ${mu1.name}`)
+          .setColor(0xFFAA00)
+          .addFields(
+            {
+              name: '📅 Date confrontate',
+              value: `**${formatItalianDate(data1)}** → **${formatItalianDate(data2)}**`,
+              inline: false
+            },
+            {
+              name: '👥 Membri',
+              value: `${mu1.memberCount} → ${mu2.memberCount} (${diff.members > 0 ? '+' : ''}${diff.members})`,
+              inline: true
+            },
+            {
+              name: '💥 Danni settimanali',
+              value: `${numberFmt(mu1.weeklyDamage)} → ${numberFmt(mu2.weeklyDamage)} (${diff.weeklyDamage > 0 ? '+' : ''}${numberFmt(diff.weeklyDamage)})`,
+              inline: true
+            },
+            {
+              name: '💥 Danni totali',
+              value: `${numberFmt(mu1.totalDamage)} → ${numberFmt(mu2.totalDamage)} (${diff.totalDamage > 0 ? '+' : ''}${numberFmt(diff.totalDamage)})`,
+              inline: true
+            },
+            {
+              name: '🤝 Reputazione',
+              value: `${mu1.reputation?.toFixed(2) || 0} → ${mu2.reputation?.toFixed(2) || 0} (${diff.reputation > 0 ? '+' : ''}${diff.reputation?.toFixed(2) || 0})`,
+              inline: true
+            },
+            {
+              name: '🟢 Nuovi membri (entrati)',
+              value: newList,
+              inline: true
+            },
+            {
+              name: '🔴 Membri usciti',
+              value: leftList,
+              inline: true
+            }
+          )
+          .setFooter({
+            text: `Report salvati: ${reports.length} giorni disponibili`
+          })
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [embed] });
+
+      } catch (error) {
+        console.error('❌ Errore nel confronto:', error);
+        await interaction.editReply(`❌ Errore: ${error.message}`);
+      }
+    }
+
+    // ------------------- COMANDO /FORZA-REPORT (TEST) ------------------------
+    if (interaction.commandName === 'forza-report') {
+      await interaction.deferReply({ ephemeral: true });
+
+      if (!MU_ID) {
+        await interaction.editReply('❌ MU_ID non configurato!');
+        return;
+      }
+
+      try {
+        const dataInput = interaction.options.getString('data');
+        const data = parseItalianDate(dataInput);
+        if (!data) {
+          await interaction.editReply('❌ Formato data non valido. Usa GG-MM-AAAA (es. 06-09-2026)');
+          return;
+        }
+
+        const mu = await warera.getMuById(MU_ID);
+        const members = [];
+        for (const memberId of (mu.members || [])) {
+          try {
+            const u = await warera.getUserLite(memberId);
+            members.push({
+              username: u.username ?? memberId,
+              weeklyDamage: u.rankings?.weeklyUserDamages?.value ?? null,
+              totalDamage: u.rankings?.userDamages?.value ?? null,
+              wealth: u.rankings?.userWealth?.value ?? null,
+            });
+          } catch {
+            members.push({ username: memberId, weeklyDamage: null, totalDamage: null, wealth: null });
+          }
+          await new Promise(r => setTimeout(r, 250));
+        }
+
+        const reportData = {
+          date: data,
+          timestamp: new Date().toISOString(),
+          mu: {
+            id: MU_ID,
+            name: mu.name,
+            country: mu.country,
+            memberCount: mu.members?.length || 0,
+            weeklyDamage: mu.rankings?.muWeeklyDamages?.value || 0,
+            totalDamage: mu.rankings?.muDamages?.value || 0,
+            reputation: mu.mercenaryReputation || 0,
+          },
+          members: members.map(m => ({
+            username: m.username,
+            weeklyDamage: m.weeklyDamage,
+            totalDamage: m.totalDamage,
+            wealth: m.wealth,
+          }))
+        };
+
+        const reportsPath = './reports.json';
+        let reports = [];
+        if (fs.existsSync(reportsPath)) {
+          const content = fs.readFileSync(reportsPath, 'utf8');
+          reports = JSON.parse(content);
+        }
+        
+        const existingIndex = reports.findIndex(r => r.date === data);
+        if (existingIndex >= 0) {
+          reports[existingIndex] = reportData;
+        } else {
+          reports.push(reportData);
+        }
+        fs.writeFileSync(reportsPath, JSON.stringify(reports, null, 2));
+
+        await interaction.editReply(`✅ Report salvato con successo per la data **${formatItalianDate(data)}**! Ora puoi usare \`/confronta\`.`);
+      } catch (err) {
+        await interaction.editReply(`❌ ${err.message}`);
+      }
     }
   } catch (err) {
     console.error(err);
