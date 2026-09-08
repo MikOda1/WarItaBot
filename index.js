@@ -843,7 +843,11 @@ client.on('interactionCreate', async (interaction) => {
             { name: '🛡️ Bunker', value: `Livello ${bunker} — ${bunker > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
             {
               name: '🎖️ Base Militare',
+<<<<<<< HEAD
               value: `Livello ${baseLevel} — ${baseLevel > 0 ? 'Attiva ✅' : 'Non attiva ❌'}\n*(dato preso così com'è dall'API WarEra: se è 0 nonostante sia stata costruita, potrebbe non essere ancora aggiornato lato server)*`,
+=======
+              value: `Livello ${baseLevel} — ${baseLevel > 0 ? 'Attiva ✅' : 'Non attiva ❌'}`,
+>>>>>>> 5f84bafee7fc0e4689b42601694c981f81d12c9a
             },
           )
           .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${regionId}` });
