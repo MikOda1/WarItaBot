@@ -1,4 +1,12 @@
 // src/index.js
+
+// Forza il fuso orario dell'intero processo su Roma (gestisce da solo il
+// passaggio CET/CEST). DEVE stare qui, prima di qualunque `new Date(...)` o
+// `require`, altrimenti alcuni moduli potrebbero già aver "letto" il fuso
+// orario di default (UTC su molti host, Wispbyte incluso) e restare
+// indietro/avanti di qualche ora rispetto all'ora italiana.
+process.env.TZ = 'Europe/Rome';
+
 require('dotenv').config();
 const {
   Client,
@@ -485,14 +493,12 @@ const commands = [
         .setRequired(true),
     ),
 
+  // TODO: comando temporaneo, da rimuovere una volta confermati i nomi dei
+  // campi "quantità" e "link battaglia" nell'oggetto contratto.
   new SlashCommandBuilder()
-    .setName('contratti')
-    .setDescription('Mostra i contratti mercenari attivi, ordinati per prezzo/k decrescente')
-    .addNumberOption((opt) =>
-      opt.setName('soglia')
-        .setDescription('Prezzo minimo per K di danni (es. 0.1). Vuoto = mostra tutti')
-        .setRequired(false),
-    ),
+    .setName('debug-contratto-mu')
+    .setDescription('[TEST] Mostra il JSON grezzo di un contratto attivo della tua MU'),
+
 ].map((c) => c.toJSON());
 
 // --- 2. Registrazione dei comandi su Discord --------------------------------
@@ -579,34 +585,55 @@ async function sendAutomaticReport() {
   }
 }
 
-// ------------------- VARIABILI PER IL CONTROLLO CONTRATTI MERCENARI -------
+// ------------------- CONTRACT HUNTER (ASTE CONTRATTI MERCENARI) -----------
+// Ogni 2 minuti:
+//  - cerca le ASTE di contratti mercenari ancora aperte (status "active" =
+//    su cui è ancora possibile fare un'offerta; se WarEra segnala in altro
+//    modo che un'asta non accetta più offerte, es. un campo tipo
+//    "acceptingBids"/"biddingClosed", va aggiunto qui al filtro)
+//  - le mostra in UN SOLO report, evidenziando con 🔥 quelle sopra soglia
+//  - se non è cambiato nulla dall'ultimo giro, non tocca Discord
+//  - se qualcosa è cambiato, MODIFICA il messaggio precedente invece di
+//    mandarne uno nuovo, così il canale non si riempie di messaggi
 const CONTRACT_CHANNEL_ID = process.env.CONTRACT_CHANNEL_ID;
+// Soglia di prezzo/k sopra la quale un'asta viene evidenziata nel report
+// (non filtra più nulla: tutte le aste attive restano visibili).
 const CONTRACT_MIN_PERK = process.env.CONTRACT_MIN_PERK ? parseFloat(process.env.CONTRACT_MIN_PERK) : null;
-const NOTIFIED_CONTRACTS_PATH = './notified-contracts.json';
+const HUNTER_STATE_PATH = './contract-hunter-state.json';
 
-function loadNotifiedContracts() {
+function loadHunterState() {
   try {
-    if (fs.existsSync(NOTIFIED_CONTRACTS_PATH)) {
-      return JSON.parse(fs.readFileSync(NOTIFIED_CONTRACTS_PATH, 'utf8'));
+    if (fs.existsSync(HUNTER_STATE_PATH)) {
+      return JSON.parse(fs.readFileSync(HUNTER_STATE_PATH, 'utf8'));
     }
   } catch (err) {
-    console.error('Errore lettura notified-contracts.json:', err);
+    console.error('Errore lettura contract-hunter-state.json:', err);
   }
-  return [];
+  return { messageId: null, signature: null };
 }
 
-function saveNotifiedContracts(list) {
+function saveHunterState(state) {
   try {
-    // Teniamo solo gli ultimi 500 ID notificati, per non far crescere il
-    // file all'infinito nel tempo.
-    fs.writeFileSync(NOTIFIED_CONTRACTS_PATH, JSON.stringify(list.slice(-500), null, 2));
+    fs.writeFileSync(HUNTER_STATE_PATH, JSON.stringify(state, null, 2));
   } catch (err) {
-    console.error('Errore salvataggio notified-contracts.json:', err);
+    console.error('Errore salvataggio contract-hunter-state.json:', err);
   }
 }
 
-async function checkMercenaryContracts() {
-  if (!CONTRACT_CHANNEL_ID || CONTRACT_MIN_PERK == null) return;
+// "tra 3 minuti", "tra un minuto", "scaduto"...
+function formatRelativeExpiry(expiresAt) {
+  const diffMs = new Date(expiresAt).getTime() - Date.now();
+  if (diffMs <= 0) return 'scaduto';
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return 'tra pochi secondi';
+  if (mins === 1) return 'tra un minuto';
+  if (mins < 60) return `tra ${mins} minuti`;
+  const hours = Math.round(mins / 60);
+  return hours === 1 ? "tra un'ora" : `tra ${hours} ore`;
+}
+
+async function contractHunter() {
+  if (!CONTRACT_CHANNEL_ID) return;
   try {
     const channel = client.channels.cache.get(CONTRACT_CHANNEL_ID);
     if (!channel) {
@@ -615,39 +642,179 @@ async function checkMercenaryContracts() {
     }
 
     const data = await warera.getMercenaryContracts(50);
-    const items = (data.items ?? []).filter(
-      (c) => c.status === 'active' && c.currentPerK >= CONTRACT_MIN_PERK,
+    const items = (data.items ?? []).filter((c) => c.status === 'active');
+    items.sort((a, b) => b.currentPerK - a.currentPerK);
+
+    // Firma dei dati rilevanti: se è identica a quella dell'ultimo giro non
+    // c'è nessuna novità, quindi non tocchiamo Discord.
+    const signature = JSON.stringify(
+      items.map((c) => [c._id, c.currentPerK, c.currentPayout, c.expiresAt]),
     );
+    const state = loadHunterState();
+    if (signature === state.signature && state.messageId) return;
 
-    const notified = loadNotifiedContracts();
-    const notifiedSet = new Set(notified);
-    const newOnes = items.filter((c) => !notifiedSet.has(c._id));
+    let embeds;
+    if (items.length === 0) {
+      embeds = [
+        new EmbedBuilder()
+          .setTitle('🏹 Contract Hunter')
+          .setColor(0x2b6cb0)
+          .setDescription('Nessuna asta di contratti mercenari attiva al momento.')
+          .setTimestamp(),
+      ];
+    } else {
+      const nazioni = await Promise.all(items.map((c) => resolveCountryName(c.forCountry)));
+      const anyHighlighted = CONTRACT_MIN_PERK != null && items.some((c) => c.currentPerK >= CONTRACT_MIN_PERK);
 
-    for (const c of newOnes) {
-      const nazione = await resolveCountryName(c.forCountry);
-      const lato = c.forCountrySide === 'attacker' ? 'Attaccante' : 'Difensore';
-      const scade = new Date(c.expiresAt).toLocaleString('it-IT');
+      // Discord: max 25 field/embed e max 10 embed/messaggio -> fino a 200
+      // aste per messaggio, paginate a gruppi di 20.
+      const CHUNK_SIZE = 20;
+      const chunks = [];
+      for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+        chunks.push(items.slice(i, i + CHUNK_SIZE));
+      }
 
-      const embed = new EmbedBuilder()
-        .setTitle('🚨 Nuovo contratto mercenario sopra soglia!')
-        .setColor(0xe53e3e)
-        .addFields(
-          { name: 'Nazione', value: nazione, inline: true },
-          { name: 'Lato', value: lato, inline: true },
-          { name: 'Prezzo/k', value: c.currentPerK.toFixed(3), inline: true },
-          { name: 'Danni minimi', value: numberFmt(c.minimumDamage), inline: true },
-          { name: 'Payout attuale', value: numberFmt(c.currentPayout), inline: true },
-          { name: 'Solo professionisti', value: c.professionalsOnly ? 'Sì' : 'No', inline: true },
-          { name: 'Scade', value: scade },
-        );
-      await channel.send({ embeds: [embed] });
+      embeds = chunks.slice(0, 10).map((chunk, idx) => {
+        const startIdx = idx * CHUNK_SIZE;
+        const embed = new EmbedBuilder()
+          .setColor(anyHighlighted ? 0xf1c40f : 0x2b6cb0)
+          .setTimestamp();
+
+        if (idx === 0) {
+          embed
+            .setTitle('🏹 Contract Hunter')
+            .setDescription(
+              `Aste attive: **${items.length}**` +
+                (CONTRACT_MIN_PERK != null ? ` · 🔥 evidenziate sopra **${CONTRACT_MIN_PERK}/k**` : ''),
+            );
+        }
+
+        chunk.forEach((c, i) => {
+          const globalIdx = startIdx + i;
+          const highlighted = CONTRACT_MIN_PERK != null && c.currentPerK >= CONTRACT_MIN_PERK;
+          const sideEmoji = c.forCountrySide === 'attacker' ? '⚔️' : '🛡️';
+          const scade = formatRelativeExpiry(c.expiresAt);
+
+          embed.addFields({
+            name: `${highlighted ? '🔥 ' : ''}#${globalIdx + 1} — ${nazioni[globalIdx]} ${sideEmoji}`,
+            value:
+              `💰 Prezzo: **${c.currentPerK.toFixed(3)}/k**\n` +
+              `🎯 Danni minimi: ${numberFmt(c.minimumDamage)}\n` +
+              `💵 Payout: ${numberFmt(c.currentPayout)}\n` +
+              `${c.professionalsOnly ? '🔒 Solo professionisti' : '🔓 Aperto a tutti'}\n` +
+              `⏳ Scade: ${scade}`,
+          });
+        });
+
+        return embed;
+      });
     }
 
-    if (newOnes.length > 0) {
-      saveNotifiedContracts([...notified, ...newOnes.map((c) => c._id)]);
+    if (state.messageId) {
+      try {
+        const msg = await channel.messages.fetch(state.messageId);
+        await msg.edit({ embeds });
+      } catch {
+        // Messaggio precedente non più trovabile (cancellato a mano, ecc.)
+        const sent = await channel.send({ embeds });
+        state.messageId = sent.id;
+      }
+    } else {
+      const sent = await channel.send({ embeds });
+      state.messageId = sent.id;
+    }
+
+    state.signature = signature;
+    saveHunterState(state);
+  } catch (err) {
+    console.error('❌ Errore in Contract Hunter:', err);
+  }
+}
+
+// ------------------- ALERT CONTRATTI DELLA PROPRIA MU ----------------------
+// Ogni 2 minuti: cerca i contratti mercenari ATTIVI aperti dalla tua MU
+// (MU_ID), a prescindere dalla nazione, e per ognuno che non hai già
+// segnalato manda un messaggio che tagga il ruolo MU_CONTRACT_ROLE_ID con
+// danni richiesti e costo.
+//
+// ⚠️ NOTA: non ho conferma del nome esatto del campo che collega un
+// contratto alla MU che lo ha aperto (non ho accesso diretto alle API di
+// WarEra da qui per verificarlo). contractMuId() prova alcuni nomi
+// plausibili con fallback a null, così finché non è confermato il filtro
+// semplicemente non troverà mai corrispondenze (nessun falso allarme, ma
+// anche nessun alert finché non sistemiamo il campo giusto). Usa il comando
+// /debug-contratto-mu per vedere i campi reali e dirmi qual è quello giusto.
+const MU_CONTRACT_CHANNEL_ID = process.env.MU_CONTRACT_CHANNEL_ID;
+const MU_CONTRACT_ROLE_ID = process.env.MU_CONTRACT_ROLE_ID;
+const MU_NOTIFIED_PATH = './mu-contracts-notified.json';
+
+function loadMuNotified() {
+  try {
+    if (fs.existsSync(MU_NOTIFIED_PATH)) {
+      return JSON.parse(fs.readFileSync(MU_NOTIFIED_PATH, 'utf8'));
     }
   } catch (err) {
-    console.error('❌ Errore nel controllo contratti mercenari:', err);
+    console.error('Errore lettura mu-contracts-notified.json:', err);
+  }
+  return [];
+}
+
+function saveMuNotified(list) {
+  try {
+    fs.writeFileSync(MU_NOTIFIED_PATH, JSON.stringify(list.slice(-500), null, 2));
+  } catch (err) {
+    console.error('Errore salvataggio mu-contracts-notified.json:', err);
+  }
+}
+
+// Tentativo di ricavare l'ID della MU che ha aperto il contratto. Da
+// confermare con /debug-contratto-mu.
+function contractMuId(c) {
+  return c.muId ?? c.mu ?? c.forMu ?? c.employerMuId ?? c.mercenaryUnitId ?? null;
+}
+
+async function checkMuContracts() {
+  if (!MU_ID || !MU_CONTRACT_CHANNEL_ID || !MU_CONTRACT_ROLE_ID) return;
+  try {
+    const channel = client.channels.cache.get(MU_CONTRACT_CHANNEL_ID);
+    if (!channel) {
+      console.error(`❌ Canale alert contratti MU ${MU_CONTRACT_CHANNEL_ID} non trovato!`);
+      return;
+    }
+
+    const data = await warera.getMercenaryContracts(50);
+    const items = (data.items ?? []).filter(
+      (c) => c.status === 'active' && contractMuId(c) === MU_ID,
+    );
+
+    const notified = loadMuNotified();
+    const notifiedSet = new Set(notified);
+    const newOnes = items.filter((c) => !notifiedSet.has(c._id));
+    if (newOnes.length === 0) return;
+
+    for (const c of newOnes) {
+      const scade = formatRelativeExpiry(c.expiresAt);
+
+      const embed = new EmbedBuilder()
+        .setTitle('🔥 Contratto attivo! Fate fuoco!')
+        .setColor(0xe53e3e)
+        .addFields(
+          { name: '🎯 Danni richiesti', value: numberFmt(c.minimumDamage), inline: true },
+          { name: '💰 Costo', value: `${c.currentPerK.toFixed(3)}/k`, inline: true },
+          { name: '💵 Payout', value: numberFmt(c.currentPayout), inline: true },
+          { name: '⏳ Scade', value: scade, inline: true },
+        );
+
+      await channel.send({
+        content: `<@&${MU_CONTRACT_ROLE_ID}> 🔥 **Contratto attivo! Fate fuoco!**`,
+        embeds: [embed],
+        allowedMentions: { roles: [MU_CONTRACT_ROLE_ID] },
+      });
+    }
+
+    saveMuNotified([...notified, ...newOnes.map((c) => c._id)]);
+  } catch (err) {
+    console.error('❌ Errore in checkMuContracts:', err);
   }
 }
 
@@ -667,12 +834,23 @@ client.once('ready', () => {
     console.warn('⚠️ Report automatico NON programmato: mancano REPORT_CHANNEL_ID o MU_ID');
   }
 
-  // --- Controllo contratti mercenari ogni 2 minuti ---
-  if (CONTRACT_CHANNEL_ID && CONTRACT_MIN_PERK != null) {
-    cron.schedule('*/2 * * * *', checkMercenaryContracts);
-    console.log(`🕑 Controllo contratti mercenari attivo ogni 2 minuti (soglia ${CONTRACT_MIN_PERK}/k).`);
+  // --- Alert contratti della propria MU, ogni 2 minuti ---
+  if (MU_ID && MU_CONTRACT_CHANNEL_ID && MU_CONTRACT_ROLE_ID) {
+    cron.schedule('*/2 * * * *', checkMuContracts);
+    console.log(`🔔 Alert contratti MU attivo ogni 2 minuti nel canale ${MU_CONTRACT_CHANNEL_ID}.`);
   } else {
-    console.warn('⚠️ Controllo contratti NON programmato: mancano CONTRACT_CHANNEL_ID o CONTRACT_MIN_PERK');
+    console.warn('⚠️ Alert contratti MU NON programmato: mancano MU_ID, MU_CONTRACT_CHANNEL_ID o MU_CONTRACT_ROLE_ID');
+  }
+
+  // --- Contract Hunter: aste contratti mercenari, ogni 2 minuti ---
+  if (CONTRACT_CHANNEL_ID) {
+    cron.schedule('*/2 * * * *', contractHunter);
+    console.log(
+      `🏹 Contract Hunter attivo ogni 2 minuti nel canale ${CONTRACT_CHANNEL_ID}` +
+        (CONTRACT_MIN_PERK != null ? ` (evidenzia sopra ${CONTRACT_MIN_PERK}/k)` : ' (nessuna soglia impostata)'),
+    );
+  } else {
+    console.warn('⚠️ Contract Hunter NON programmato: manca CONTRACT_CHANNEL_ID');
   }
 });
 
@@ -1251,56 +1429,39 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    // ------------------- COMANDO /CONTRATTI -----------------------------------
-    if (interaction.commandName === 'contratti') {
-      await interaction.deferReply();
+    // ---------------- COMANDO /DEBUG-CONTRATTO-MU (TEST, TEMPORANEO) -------
+    if (interaction.commandName === 'debug-contratto-mu') {
+      await interaction.deferReply({ ephemeral: true });
       try {
-        const soglia = interaction.options.getNumber('soglia');
         const data = await warera.getMercenaryContracts(50);
-        let items = (data.items ?? []).filter((c) => c.status === 'active');
-        if (soglia != null) items = items.filter((c) => c.currentPerK >= soglia);
-        items.sort((a, b) => b.currentPerK - a.currentPerK);
-        items = items.slice(0, 10);
+        const items = (data.items ?? []).filter((c) => c.status === 'active');
 
         if (items.length === 0) {
           await interaction.editReply(
-            soglia != null
-              ? `Nessun contratto attivo trovato sopra ${soglia}/k danni.`
-              : 'Nessun contratto attivo al momento.',
+            'Nessun contratto attivo al momento (di nessuna MU/nazione). Riprova quando ce n\'è uno aperto.',
           );
           return;
         }
 
-        const nazioni = await Promise.all(items.map((c) => resolveCountryName(c.forCountry)));
+        // Mostriamo l'unione di tutti i nomi di campo presenti in tutti i
+        // contratti attivi: se esiste un campo tipo "muId"/"mu"/ecc. che
+        // collega il contratto alla MU che lo ha aperto, lo vediamo qui.
+        const allKeys = [...new Set(items.flatMap((c) => Object.keys(c)))].sort();
 
-        const embed = new EmbedBuilder()
-          .setTitle('💰 Contratti mercenari attivi')
-          .setColor(0x2b6cb0)
-          .setDescription(
-            soglia != null
-              ? `Soglia minima: **${soglia}/k danni** — ordinati per prezzo/k decrescente`
-              : 'Tutti i contratti attivi, ordinati per prezzo/k decrescente',
-          );
+        const json = JSON.stringify(items[0], null, 2);
+        const body = json.length > 1400 ? json.slice(0, 1400) + '\n... (troncato)' : json;
 
-        items.forEach((c, i) => {
-          const lato = c.forCountrySide === 'attacker' ? 'Attaccante' : 'Difensore';
-          const scade = new Date(c.expiresAt).toLocaleTimeString('it-IT', {
-            hour: '2-digit',
-            minute: '2-digit',
-          });
-          embed.addFields({
-            name: `${nazioni[i]} — ${lato}`,
-            value:
-              `Prezzo: **${c.currentPerK.toFixed(3)}/k** · Danni min: ${numberFmt(c.minimumDamage)} · ` +
-              `Payout: ${numberFmt(c.currentPayout)} · ${c.professionalsOnly ? 'Solo pro' : 'Aperto a tutti'} · Scade ${scade}`,
-          });
-        });
-
-        await interaction.editReply({ embeds: [embed] });
+        await interaction.editReply(
+          `**Contratti attivi trovati:** ${items.length}\n` +
+          `**Campi presenti in tutti i contratti:**\n\`${allKeys.join(', ')}\`\n\n` +
+          `**Esempio completo (1° contratto):**\n\`\`\`json\n${body}\n\`\`\`\n` +
+          `Dimmi quale campo (se presente) identifica la MU che ha aperto il contratto, così lo aggancio a \`contractMuId()\`.`,
+        );
       } catch (err) {
         await interaction.editReply(`❌ ${err.message}`);
       }
     }
+
   } catch (err) {
     console.error(err);
     const msg = `Errore nel contattare WarEra: ${err.message}`;
