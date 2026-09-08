@@ -75,12 +75,97 @@ function formatSkillGroup(skills, group) {
     .join('\n');
 }
 
+const ITEM_NAMES_IT = {
+  steel: 'Acciaio',
+  iron: 'Ferro',
+  oil: 'Petrolio',
+  lithium: 'Litio',
+  aluminum: 'Alluminio',
+  wood: 'Legno',
+  stone: 'Pietra',
+  food: 'Cibo',
+  wheat: 'Grano',
+  fish: 'Pesce',
+  water: 'Acqua',
+  coal: 'Carbone',
+  weapons: 'Armi',
+  ammo: 'Munizioni',
+  fuel: 'Carburante',
+};
+
+function itemNameIt(code) {
+  if (!code) return 'n/d';
+  return ITEM_NAMES_IT[code] ?? code.charAt(0).toUpperCase() + code.slice(1);
+}
+
 function numberFmt(n) {
   if (typeof n !== 'number' || Number.isNaN(n)) return 'n/d';
   const abs = Math.abs(n);
   if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (abs >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+// Formatta un numero con segno esplicito (+/-), utile per mostrare variazioni.
+function signedFmt(n) {
+  if (typeof n !== 'number' || Number.isNaN(n)) return 'n/d';
+  const f = numberFmt(n);
+  return n > 0 ? `+${f}` : f;
+}
+
+// Tabella delle variazioni (Δ danni settimanali/totali/ricchezza) per i
+// membri presenti in entrambi i report messi a confronto.
+function buildMemberDeltaFields(members1, members2) {
+  const map1 = new Map(members1.map((m) => [m.username, m]));
+  const map2 = new Map(members2.map((m) => [m.username, m]));
+  const common = [...map2.keys()]
+    .filter((u) => map1.has(u))
+    .sort((a, b) => a.localeCompare(b, 'it', { sensitivity: 'base' }));
+
+  if (common.length === 0) {
+    return [{ name: '📈 Variazione membri', value: 'Nessun membro presente in entrambi i report.' }];
+  }
+
+  const NAME_W = Math.min(16, Math.max(10, ...common.map((u) => u.length)));
+  const VAL_W = 8; // i valori con segno (es. "+123.45K") sono un carattere più lunghi
+  const col = (s, len) => String(s).slice(0, len).padEnd(len, ' ');
+  const colR = (s, len) => String(s).slice(0, len).padStart(len, ' ');
+  const row = (name, v1, v2, v3) =>
+    `${col(name, NAME_W)}   ${colR(v1, VAL_W)}   ${colR(v2, VAL_W)}   ${colR(v3, VAL_W)}`;
+
+  const headerRow = row('Nome', 'ΔSett.', 'ΔTot.', 'ΔRicch.');
+  const separator = '-'.repeat(headerRow.length);
+  const MAX_FIELD_VALUE = 1024;
+  const wrap = (lines) => '```\n' + lines.join('\n') + '\n```';
+
+  const fields = [];
+  let current = [headerRow, separator];
+
+  for (const u of common) {
+    const a = map1.get(u);
+    const b = map2.get(u);
+    const dWeekly = (b.weeklyDamage ?? 0) - (a.weeklyDamage ?? 0);
+    const dTotal = (b.totalDamage ?? 0) - (a.totalDamage ?? 0);
+    const dWealth = (b.wealth ?? 0) - (a.wealth ?? 0);
+    const line = row(u, signedFmt(dWeekly), signedFmt(dTotal), signedFmt(dWealth));
+    const candidate = current.concat([line]);
+    if (wrap(candidate).length <= MAX_FIELD_VALUE) {
+      current = candidate;
+    } else {
+      fields.push({
+        name: fields.length === 0 ? '📈 Variazione membri (comuni ai due report)' : '\u200b',
+        value: wrap(current),
+      });
+      current = [headerRow, separator, line];
+    }
+  }
+  if (current.length > 2) {
+    fields.push({
+      name: fields.length === 0 ? '📈 Variazione membri (comuni ai due report)' : '\u200b',
+      value: wrap(current),
+    });
+  }
+  return fields;
 }
 
 async function resolveUsername(userId) {
@@ -93,80 +178,56 @@ async function resolveUsername(userId) {
   }
 }
 
+// Converte un codice paese a 2 lettere (es. "it") in emoji bandiera 🇮🇹
+// usando i simboli indicatori regionali Unicode.
+function flagEmoji(code) {
+  if (!code || code.length !== 2) return '';
+  const upper = code.toUpperCase();
+  const base = 0x1f1e6; // 🇦
+  return String.fromCodePoint(...[...upper].map((c) => base + c.charCodeAt(0) - 65));
+}
+
 async function resolveCountryName(countryId) {
   if (!countryId) return 'n/d';
   try {
     const country = await warera.getCountryById(countryId);
-    return country?.name ?? countryId;
+    if (!country?.name) return countryId;
+    const flag = flagEmoji(country.code);
+    return flag ? `${flag} ${country.name}` : country.name;
   } catch {
     return countryId;
   }
 }
 
-// --- Funzioni di ricerca ROBUSTE (con debug) ---
+// --- Funzioni di ricerca (usano search.searchAnything: restituisce solo ID,
+// gia' ordinati per pertinenza da WarEra, non oggetti con username) --------
 
 async function findUserIdByName(searchTerm) {
   try {
-    const results = await warera.raw('search.searchAnything', { query: searchTerm });
-    
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] Ricerca: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
-    console.log(`🔍 Debug ricerca salvato in debug_search.log per "${searchTerm}"`);
-    
-    const users = results.users || [];
-    if (users.length === 0) {
-      console.log(`⚠️ Nessun utente trovato per "${searchTerm}" nei risultati.`);
+    const results = await warera.raw('search.searchAnything', { searchText: searchTerm });
+    const ids = results.userIds || [];
+    if (ids.length === 0) {
+      console.log(`⚠️ Nessun utente trovato per "${searchTerm}".`);
       return null;
     }
-    
-    const exactMatch = users.find(u => 
-      u.username && u.username.toLowerCase() === searchTerm.toLowerCase()
-    );
-    
-    if (exactMatch) {
-      console.log(`✅ Trovato utente esatto: ${exactMatch.username} (ID: ${exactMatch._id})`);
-      return exactMatch._id;
-    }
-    
-    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${users[0].username}`);
-    return users[0]._id;
-    
+    console.log(`✅ Trovato utente per "${searchTerm}": ${ids[0]}`);
+    return ids[0];
   } catch (err) {
     console.error('❌ Errore nella ricerca utente:', err);
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] ERRORE ricerca: "${searchTerm}"\n${err.message}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
     return null;
   }
 }
 
 async function findMuIdByName(searchTerm) {
   try {
-    const results = await warera.raw('search.searchAnything', { query: searchTerm });
-    
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] Ricerca MU: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
-    
-    const mus = results.mus || [];
-    if (mus.length === 0) {
-      console.log(`⚠️ Nessuna MU trovata per "${searchTerm}"`);
+    const results = await warera.raw('search.searchAnything', { searchText: searchTerm });
+    const ids = results.muIds || [];
+    if (ids.length === 0) {
+      console.log(`⚠️ Nessuna MU trovata per "${searchTerm}".`);
       return null;
     }
-    
-    const exactMatch = mus.find(m => 
-      m.name && m.name.toLowerCase() === searchTerm.toLowerCase()
-    );
-    
-    if (exactMatch) {
-      console.log(`✅ Trovata MU esatta: ${exactMatch.name} (ID: ${exactMatch._id})`);
-      return exactMatch._id;
-    }
-    
-    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${mus[0].name}`);
-    return mus[0]._id;
-    
+    console.log(`✅ Trovata MU per "${searchTerm}": ${ids[0]}`);
+    return ids[0];
   } catch (err) {
     console.error('❌ Errore nella ricerca MU:', err);
     return null;
@@ -175,30 +236,14 @@ async function findMuIdByName(searchTerm) {
 
 async function findRegionIdByName(searchTerm) {
   try {
-    const results = await warera.raw('search.searchAnything', { query: searchTerm });
-    
-    const debugPath = './debug_search.log';
-    const debugContent = `[${new Date().toISOString()}] Ricerca REGIONE: "${searchTerm}"\n${JSON.stringify(results, null, 2)}\n\n`;
-    fs.appendFileSync(debugPath, debugContent);
-    
-    const regions = results.regions || [];
-    if (regions.length === 0) {
-      console.log(`⚠️ Nessuna regione trovata per "${searchTerm}"`);
+    const results = await warera.raw('search.searchAnything', { searchText: searchTerm });
+    const ids = results.regionIds || [];
+    if (ids.length === 0) {
+      console.log(`⚠️ Nessuna regione trovata per "${searchTerm}".`);
       return null;
     }
-    
-    const exactMatch = regions.find(r => 
-      r.name && r.name.toLowerCase() === searchTerm.toLowerCase()
-    );
-    
-    if (exactMatch) {
-      console.log(`✅ Trovata regione esatta: ${exactMatch.name} (ID: ${exactMatch._id})`);
-      return exactMatch._id;
-    }
-    
-    console.log(`⚠️ Nessun match esatto per "${searchTerm}", prendo il primo risultato: ${regions[0].name}`);
-    return regions[0]._id;
-    
+    console.log(`✅ Trovata regione per "${searchTerm}": ${ids[0]}`);
+    return ids[0];
   } catch (err) {
     console.error('❌ Errore nella ricerca regione:', err);
     return null;
@@ -244,51 +289,48 @@ async function buildMuReportEmbed(muId, isAutomatic = false) {
 
   const errorMessage = errorCount > 0 ? `\n⚠️ ${errorCount} membro/i non recuperato/i correttamente.` : '';
 
+  // Ordine alfabetico: resta stabile nel tempo, utile per confrontare lo
+  // stesso giocatore report dopo report (a differenza dell'ordine per danni).
   members.sort((a, b) => a.username.localeCompare(b.username, 'it', { sensitivity: 'base' }));
 
-  const memberList = members.map(m => {
-    const weekly = m.weeklyDamage !== null ? numberFmt(m.weeklyDamage) : 'n/d';
-    const total = m.totalDamage !== null ? numberFmt(m.totalDamage) : 'n/d';
-    const wealth = m.wealth !== null ? numberFmt(m.wealth) : 'n/d';
-    return `• **${m.username}**  (Sett: ${weekly} | Tot: ${total} | Ricch: ${wealth})`;
-  }).join('\n');
+  // --- Tabella allineata a colonne, senza bordi laterali ---------------
+  const NAME_W = Math.min(16, Math.max(10, ...members.map((m) => m.username.length)));
+  const VAL_W = 7;
+  const col = (s, len) => String(s).slice(0, len).padEnd(len, ' ');
+  const colR = (s, len) => String(s).slice(0, len).padStart(len, ' ');
+  const row = (name, v1, v2, v3) =>
+    `${col(name, NAME_W)}   ${colR(v1, VAL_W)}   ${colR(v2, VAL_W)}   ${colR(v3, VAL_W)}`;
+
+  const headerRow = row('Nome', 'Sett.', 'Tot.', 'Ricch.');
+  const separator = '-'.repeat(headerRow.length);
 
   const MAX_FIELD_VALUE = 1024;
+  const wrap = (lines) => '```\n' + lines.join('\n') + '\n```';
+
   const memberFields = [];
+  let currentLines = [headerRow, separator];
 
-  if (!memberList || memberList.length === 0) {
-    memberFields.push({
-      name: '📋 Membri',
-      value: 'Nessun membro trovato in questa MU.',
-    });
-  } else if (memberList.length <= MAX_FIELD_VALUE) {
-    memberFields.push({
-      name: '📋 Membri (ordine alfabetico)',
-      value: memberList,
-    });
-  } else {
-    const lines = memberList.split('\n');
-    let currentChunk = '';
-    let chunkCount = 1;
-
-    for (const line of lines) {
-      if ((currentChunk + '\n' + line).length <= MAX_FIELD_VALUE) {
-        currentChunk += (currentChunk ? '\n' : '') + line;
-      } else {
-        memberFields.push({
-          name: chunkCount === 1 ? '📋 Membri (ordine alfabetico)' : '\u200b',
-          value: currentChunk,
-        });
-        currentChunk = line;
-        chunkCount++;
-      }
-    }
-    if (currentChunk) {
+  for (const m of members) {
+    const line = row(m.username, numberFmt(m.weeklyDamage), numberFmt(m.totalDamage), numberFmt(m.wealth));
+    const candidate = currentLines.concat([line]);
+    if (wrap(candidate).length <= MAX_FIELD_VALUE) {
+      currentLines = candidate;
+    } else {
       memberFields.push({
-        name: '\u200b',
-        value: currentChunk,
+        name: memberFields.length === 0 ? '📋 Membri (ordine alfabetico)' : '\u200b',
+        value: wrap(currentLines),
       });
+      currentLines = [headerRow, separator, line];
     }
+  }
+  if (currentLines.length > 2) {
+    memberFields.push({
+      name: memberFields.length === 0 ? '📋 Membri (ordine alfabetico)' : '\u200b',
+      value: wrap(currentLines),
+    });
+  }
+  if (memberFields.length === 0) {
+    memberFields.push({ name: '📋 Membri', value: 'Nessun membro trovato in questa MU.' });
   }
 
   const hq = mu.activeUpgradeLevels?.headquarters ?? 0;
@@ -404,6 +446,13 @@ const commands = [
         .setName('campo')
         .setDescription('Path del campo da isolare, es. "rankings". Vuoto = elenco chiavi.')
         .setRequired(false),
+    )
+    .addStringOption((opt) =>
+      opt
+        .setName('metodo')
+        .setDescription('GET (default) o POST — alcuni endpoint come company.getCompanies richiedono POST')
+        .setRequired(false)
+        .addChoices({ name: 'GET', value: 'GET' }, { name: 'POST', value: 'POST' }),
     ),
 
   new SlashCommandBuilder()
@@ -585,7 +634,7 @@ client.on('interactionCreate', async (interaction) => {
           : ['n/d', 'n/d', 'n/d', 'n/d', 'n/d'];
 
       const embed = new EmbedBuilder()
-        .setTitle(`🏳️ ${country.name}`)
+        .setTitle(`${flagEmoji(country.code) || '🏳️'} ${country.name}`)
         .setColor(0x2b6cb0)
         .addFields(
           { name: '👥 Popolazione', value: numberFmt(country.currentPopulation), inline: true },
@@ -601,7 +650,7 @@ client.on('interactionCreate', async (interaction) => {
               `**Min. Economia:** ${ministroEconomia}`,
           },
           { name: '⚖️ Etiche del partito', value: ethicsText },
-          { name: '🏭 Specializzazione', value: String(country.specializedItem ?? 'n/d'), inline: true },
+          { name: '🏭 Specializzazione', value: itemNameIt(country.specializedItem), inline: true },
           { name: '📈 Bonus produzione', value: `${country.strategicResources?.bonuses?.productionPercent ?? 0}%`, inline: true },
           {
             name: '💰 Tassazione',
@@ -619,7 +668,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       const searchTerm = interaction.options.getString('cerca');
       
-      const isId = /^\d+$/.test(searchTerm);
+      const isId = /^[0-9a-fA-F]{24}$/.test(searchTerm); // ID WarEra = 24 caratteri esadecimali (MongoDB ObjectId)
       let userId = searchTerm;
       let usedName = null;
       
@@ -641,6 +690,34 @@ client.on('interactionCreate', async (interaction) => {
           user.mu ? warera.getMuById(user.mu).then((m) => m?.name ?? user.mu).catch(() => user.mu) : 'Nessuna',
         ]);
 
+        // Aziende: prima l'elenco degli ID, poi i dettagli di ciascuna
+        // (massimo 12 aziende per giocatore nel gioco).
+        let aziendeText = 'Nessuna azienda';
+        try {
+          const companiesList = await warera.getCompaniesByUserId(userId, 20);
+          const companyIds = (companiesList.items ?? []).slice(0, 12);
+          if (companyIds.length > 0) {
+            const companies = await Promise.all(
+              companyIds.map((id) => warera.getCompanyById(id).catch(() => null)),
+            );
+            aziendeText = companies
+              .filter(Boolean)
+              .map((c) => {
+                const lvl = c.activeUpgradeLevels ?? {};
+                const stato = c.disabledAt ? 'Disabilitata ❌' : 'Attiva ✅';
+                return (
+                  `**${itemNameIt(c.itemCode) ?? c.name ?? 'n/d'}** — ${stato}\n` +
+                  `Magazzino Lv${lvl.storage ?? 0}, Automazione Lv${lvl.automatedEngine ?? 0}, ` +
+                  `Dipendenti: ${c.workerCount ?? 0}`
+                );
+              })
+              .join('\n');
+            if (!aziendeText) aziendeText = 'Nessuna azienda';
+          }
+        } catch {
+          aziendeText = 'n/d (errore nel recupero)';
+        }
+
         const r = user.rankings ?? {};
         const embed = new EmbedBuilder()
           .setTitle(`🪖 ${user.username ?? userId}`)
@@ -655,7 +732,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: '💥 Danni totali', value: numberFmt(r.userDamages?.value), inline: true },
             { name: '⚔️ Abilità di combattimento', value: formatSkillGroup(user.skills, COMBAT_SKILLS) },
             { name: '💼 Abilità economiche', value: formatSkillGroup(user.skills, ECONOMIC_SKILLS) },
-            { name: '🏭 Aziende', value: 'Non disponibile pubblicamente via API (dato privato)' },
+            { name: '🏭 Aziende', value: aziendeText },
           )
           .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${userId}` });
           
@@ -671,7 +748,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       const searchTerm = interaction.options.getString('cerca');
       
-      const isId = /^\d+$/.test(searchTerm);
+      const isId = /^[0-9a-fA-F]{24}$/.test(searchTerm); // ID WarEra = 24 caratteri esadecimali (MongoDB ObjectId)
       let muId = searchTerm;
       let usedName = null;
       
@@ -732,7 +809,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       const searchTerm = interaction.options.getString('cerca');
       
-      const isId = /^\d+$/.test(searchTerm);
+      const isId = /^[0-9a-fA-F]{24}$/.test(searchTerm); // ID WarEra = 24 caratteri esadecimali (MongoDB ObjectId)
       let regionId = searchTerm;
       let usedName = null;
       
@@ -755,6 +832,7 @@ client.on('interactionCreate', async (interaction) => {
         ]);
 
         const bunker = region.activeUpgradeLevels?.bunker ?? 0;
+        const baseLevel = region.activeUpgradeLevels?.base ?? 0;
 
         const embed = new EmbedBuilder()
           .setTitle(`🗺️ ${region.name}`)
@@ -763,7 +841,10 @@ client.on('interactionCreate', async (interaction) => {
             { name: '🏳️ Nazione di appartenenza', value: nazioneOriginale, inline: true },
             { name: '🚩 Nazione attuale', value: nazioneAttuale, inline: true },
             { name: '🛡️ Bunker', value: `Livello ${bunker} — ${bunker > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
-            { name: '🎖️ Base Militare', value: 'Non ancora individuata via API pubblica (usa /warera-raw per riprovare)' },
+            {
+              name: '🎖️ Base Militare',
+              value: `Livello ${baseLevel} — ${baseLevel > 0 ? 'Attiva ✅' : 'Non attiva ❌'}\n*(dato preso così com'è dall'API WarEra: se è 0 nonostante sia stata costruita, potrebbe non essere ancora aggiornato lato server)*`,
+            },
           )
           .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${regionId}` });
 
@@ -792,6 +873,7 @@ client.on('interactionCreate', async (interaction) => {
       const endpoint = interaction.options.getString('endpoint');
       const paramsStr = interaction.options.getString('parametri') || '{}';
       const campo = interaction.options.getString('campo');
+      const metodo = interaction.options.getString('metodo') || 'GET';
       let params;
       try {
         params = JSON.parse(paramsStr);
@@ -799,7 +881,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply('I "parametri" devono essere un JSON valido, es. {"userId":"123"}');
         return;
       }
-      const data = await warera.raw(endpoint, params);
+      const data = metodo === 'POST' ? await warera.rawPost(endpoint, params) : await warera.raw(endpoint, params);
       const base = Array.isArray(data) ? data[0] : data;
 
       let output;
@@ -946,6 +1028,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const newList = newMembers.slice(0, 10).map(m => `• ${m.username}`).join('\n') || 'Nessuno';
         const leftList = leftMembers.slice(0, 10).map(m => `• ${m.username}`).join('\n') || 'Nessuno';
+        const deltaFields = buildMemberDeltaFields(members1, members2);
 
         const embed = new EmbedBuilder()
           .setTitle(`📊 Confronto Report MU: ${mu1.name}`)
@@ -985,7 +1068,8 @@ client.on('interactionCreate', async (interaction) => {
               name: '🔴 Membri usciti',
               value: leftList,
               inline: true
-            }
+            },
+            ...deltaFields,
           )
           .setFooter({
             text: `Report salvati: ${reports.length} giorni disponibili`
