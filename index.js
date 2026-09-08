@@ -126,12 +126,12 @@ function buildMemberDeltaFields(members1, members2) {
     return [{ name: '📈 Variazione membri', value: 'Nessun membro presente in entrambi i report.' }];
   }
 
-  const NAME_W = Math.min(16, Math.max(10, ...common.map((u) => u.length)));
-  const VAL_W = 8; // i valori con segno (es. "+123.45K") sono un carattere più lunghi
+  const NAME_W = 8;
+  const VAL_W = 7; // i valori con segno (es. "+123.4K") potrebbero troncare l'ultimo carattere in rari casi
   const col = (s, len) => String(s).slice(0, len).padEnd(len, ' ');
   const colR = (s, len) => String(s).slice(0, len).padStart(len, ' ');
   const row = (name, v1, v2, v3) =>
-    `${col(name, NAME_W)}   ${colR(v1, VAL_W)}   ${colR(v2, VAL_W)}   ${colR(v3, VAL_W)}`;
+    `${col(name, NAME_W)} ${colR(v1, VAL_W)} ${colR(v2, VAL_W)} ${colR(v3, VAL_W)}`;
 
   const headerRow = row('Nome', 'ΔSett.', 'ΔTot.', 'ΔRicch.');
   const separator = '-'.repeat(headerRow.length);
@@ -294,12 +294,15 @@ async function buildMuReportEmbed(muId, isAutomatic = false) {
   members.sort((a, b) => a.username.localeCompare(b.username, 'it', { sensitivity: 'base' }));
 
   // --- Tabella allineata a colonne, senza bordi laterali ---------------
-  const NAME_W = Math.min(16, Math.max(10, ...members.map((m) => m.username.length)));
+  // Colonne strette apposta: la larghezza dell'embed su Discord varia in
+  // base alla finestra/zoom di chi legge, quindi solo una riga corta e'
+  // garantita a non andare mai a capo, indipendentemente dal client.
+  const NAME_W = 8;
   const VAL_W = 7;
   const col = (s, len) => String(s).slice(0, len).padEnd(len, ' ');
   const colR = (s, len) => String(s).slice(0, len).padStart(len, ' ');
   const row = (name, v1, v2, v3) =>
-    `${col(name, NAME_W)}   ${colR(v1, VAL_W)}   ${colR(v2, VAL_W)}   ${colR(v3, VAL_W)}`;
+    `${col(name, NAME_W)} ${colR(v1, VAL_W)} ${colR(v2, VAL_W)} ${colR(v3, VAL_W)}`;
 
   const headerRow = row('Nome', 'Sett.', 'Tot.', 'Ricch.');
   const separator = '-'.repeat(headerRow.length);
@@ -481,6 +484,15 @@ const commands = [
         .setDescription('Data nel formato GG-MM-AAAA (es. 06-09-2026)')
         .setRequired(true),
     ),
+
+  new SlashCommandBuilder()
+    .setName('contratti')
+    .setDescription('Mostra i contratti mercenari attivi, ordinati per prezzo/k decrescente')
+    .addNumberOption((opt) =>
+      opt.setName('soglia')
+        .setDescription('Prezzo minimo per K di danni (es. 0.1). Vuoto = mostra tutti')
+        .setRequired(false),
+    ),
 ].map((c) => c.toJSON());
 
 // --- 2. Registrazione dei comandi su Discord --------------------------------
@@ -567,6 +579,78 @@ async function sendAutomaticReport() {
   }
 }
 
+// ------------------- VARIABILI PER IL CONTROLLO CONTRATTI MERCENARI -------
+const CONTRACT_CHANNEL_ID = process.env.CONTRACT_CHANNEL_ID;
+const CONTRACT_MIN_PERK = process.env.CONTRACT_MIN_PERK ? parseFloat(process.env.CONTRACT_MIN_PERK) : null;
+const NOTIFIED_CONTRACTS_PATH = './notified-contracts.json';
+
+function loadNotifiedContracts() {
+  try {
+    if (fs.existsSync(NOTIFIED_CONTRACTS_PATH)) {
+      return JSON.parse(fs.readFileSync(NOTIFIED_CONTRACTS_PATH, 'utf8'));
+    }
+  } catch (err) {
+    console.error('Errore lettura notified-contracts.json:', err);
+  }
+  return [];
+}
+
+function saveNotifiedContracts(list) {
+  try {
+    // Teniamo solo gli ultimi 500 ID notificati, per non far crescere il
+    // file all'infinito nel tempo.
+    fs.writeFileSync(NOTIFIED_CONTRACTS_PATH, JSON.stringify(list.slice(-500), null, 2));
+  } catch (err) {
+    console.error('Errore salvataggio notified-contracts.json:', err);
+  }
+}
+
+async function checkMercenaryContracts() {
+  if (!CONTRACT_CHANNEL_ID || CONTRACT_MIN_PERK == null) return;
+  try {
+    const channel = client.channels.cache.get(CONTRACT_CHANNEL_ID);
+    if (!channel) {
+      console.error(`❌ Canale contratti ${CONTRACT_CHANNEL_ID} non trovato!`);
+      return;
+    }
+
+    const data = await warera.getMercenaryContracts(50);
+    const items = (data.items ?? []).filter(
+      (c) => c.status === 'active' && c.currentPerK >= CONTRACT_MIN_PERK,
+    );
+
+    const notified = loadNotifiedContracts();
+    const notifiedSet = new Set(notified);
+    const newOnes = items.filter((c) => !notifiedSet.has(c._id));
+
+    for (const c of newOnes) {
+      const nazione = await resolveCountryName(c.forCountry);
+      const lato = c.forCountrySide === 'attacker' ? 'Attaccante' : 'Difensore';
+      const scade = new Date(c.expiresAt).toLocaleString('it-IT');
+
+      const embed = new EmbedBuilder()
+        .setTitle('🚨 Nuovo contratto mercenario sopra soglia!')
+        .setColor(0xe53e3e)
+        .addFields(
+          { name: 'Nazione', value: nazione, inline: true },
+          { name: 'Lato', value: lato, inline: true },
+          { name: 'Prezzo/k', value: c.currentPerK.toFixed(3), inline: true },
+          { name: 'Danni minimi', value: numberFmt(c.minimumDamage), inline: true },
+          { name: 'Payout attuale', value: numberFmt(c.currentPayout), inline: true },
+          { name: 'Solo professionisti', value: c.professionalsOnly ? 'Sì' : 'No', inline: true },
+          { name: 'Scade', value: scade },
+        );
+      await channel.send({ embeds: [embed] });
+    }
+
+    if (newOnes.length > 0) {
+      saveNotifiedContracts([...notified, ...newOnes.map((c) => c._id)]);
+    }
+  } catch (err) {
+    console.error('❌ Errore nel controllo contratti mercenari:', err);
+  }
+}
+
 // ------------------- QUANDO IL BOT È PRONTO --------------------------------
 client.once('ready', () => {
   console.log(`✅ Bot connesso come ${client.user.tag}`);
@@ -581,6 +665,14 @@ client.once('ready', () => {
     console.log('⏰ Report automatico programmato per le 9:00 ogni giorno (fuso orario: Europe/Rome)');
   } else {
     console.warn('⚠️ Report automatico NON programmato: mancano REPORT_CHANNEL_ID o MU_ID');
+  }
+
+  // --- Controllo contratti mercenari ogni 2 minuti ---
+  if (CONTRACT_CHANNEL_ID && CONTRACT_MIN_PERK != null) {
+    cron.schedule('*/2 * * * *', checkMercenaryContracts);
+    console.log(`🕑 Controllo contratti mercenari attivo ogni 2 minuti (soglia ${CONTRACT_MIN_PERK}/k).`);
+  } else {
+    console.warn('⚠️ Controllo contratti NON programmato: mancano CONTRACT_CHANNEL_ID o CONTRACT_MIN_PERK');
   }
 });
 
@@ -843,11 +935,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: '🛡️ Bunker', value: `Livello ${bunker} — ${bunker > 0 ? 'Attivo ✅' : 'Non attivo ❌'}` },
             {
               name: '🎖️ Base Militare',
-<<<<<<< HEAD
               value: `Livello ${baseLevel} — ${baseLevel > 0 ? 'Attiva ✅' : 'Non attiva ❌'}\n*(dato preso così com'è dall'API WarEra: se è 0 nonostante sia stata costruita, potrebbe non essere ancora aggiornato lato server)*`,
-=======
-              value: `Livello ${baseLevel} — ${baseLevel > 0 ? 'Attiva ✅' : 'Non attiva ❌'}`,
->>>>>>> 5f84bafee7fc0e4689b42601694c981f81d12c9a
             },
           )
           .setFooter({ text: usedName ? `Ricerca per nome: "${usedName}"` : `ID: ${regionId}` });
@@ -973,7 +1061,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // ------------------- COMANDO /CONFRONTA (GG-MM-AAAA) ---------------------
     if (interaction.commandName === 'confronta') {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply();
 
       try {
         const data1Input = interaction.options.getString('data1');
@@ -1158,6 +1246,57 @@ client.on('interactionCreate', async (interaction) => {
         fs.writeFileSync(reportsPath, JSON.stringify(reports, null, 2));
 
         await interaction.editReply(`✅ Report salvato con successo per la data **${formatItalianDate(data)}**! Ora puoi usare \`/confronta\`.`);
+      } catch (err) {
+        await interaction.editReply(`❌ ${err.message}`);
+      }
+    }
+
+    // ------------------- COMANDO /CONTRATTI -----------------------------------
+    if (interaction.commandName === 'contratti') {
+      await interaction.deferReply();
+      try {
+        const soglia = interaction.options.getNumber('soglia');
+        const data = await warera.getMercenaryContracts(50);
+        let items = (data.items ?? []).filter((c) => c.status === 'active');
+        if (soglia != null) items = items.filter((c) => c.currentPerK >= soglia);
+        items.sort((a, b) => b.currentPerK - a.currentPerK);
+        items = items.slice(0, 10);
+
+        if (items.length === 0) {
+          await interaction.editReply(
+            soglia != null
+              ? `Nessun contratto attivo trovato sopra ${soglia}/k danni.`
+              : 'Nessun contratto attivo al momento.',
+          );
+          return;
+        }
+
+        const nazioni = await Promise.all(items.map((c) => resolveCountryName(c.forCountry)));
+
+        const embed = new EmbedBuilder()
+          .setTitle('💰 Contratti mercenari attivi')
+          .setColor(0x2b6cb0)
+          .setDescription(
+            soglia != null
+              ? `Soglia minima: **${soglia}/k danni** — ordinati per prezzo/k decrescente`
+              : 'Tutti i contratti attivi, ordinati per prezzo/k decrescente',
+          );
+
+        items.forEach((c, i) => {
+          const lato = c.forCountrySide === 'attacker' ? 'Attaccante' : 'Difensore';
+          const scade = new Date(c.expiresAt).toLocaleTimeString('it-IT', {
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          embed.addFields({
+            name: `${nazioni[i]} — ${lato}`,
+            value:
+              `Prezzo: **${c.currentPerK.toFixed(3)}/k** · Danni min: ${numberFmt(c.minimumDamage)} · ` +
+              `Payout: ${numberFmt(c.currentPayout)} · ${c.professionalsOnly ? 'Solo pro' : 'Aperto a tutti'} · Scade ${scade}`,
+          });
+        });
+
+        await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         await interaction.editReply(`❌ ${err.message}`);
       }

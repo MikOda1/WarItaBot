@@ -99,6 +99,10 @@ const warera = {
     postEndpoint('company.getCompanies', { userId, perPage, ...(cursor ? { cursor } : {}) }),
 
   getCompanyById: (companyId) => callEndpoint('company.getById', { companyId }),
+
+  // Contratti mercenari attivi (asta): endpoint POST con paginazione.
+  getMercenaryContracts: (perPage = 50) =>
+    postEndpoint('mercenaryContractAuction.getPaginatedAuctions', { perPage }),
 };
 
 module.exports = warera;
