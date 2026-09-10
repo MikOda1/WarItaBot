@@ -684,20 +684,26 @@ function mondayMidnight(weeksAgo = 0) {
 }
 
 // Trova, tra gli snapshot salvati, quello con data più vicina a targetIso
-// (entro toleranceDays giorni). Utile perché il bot potrebbe non aver
-// salvato uno snapshot esattamente nel giorno che ci serve (riavvii, downtime...).
+// SENZA MAI guardare avanti nel tempo (entro toleranceDays giorni indietro).
+// Un report preso "nel futuro" rispetto al confine che cerchiamo (es. lo
+// snapshot di lunedì quando cerchiamo "fine settimana scorsa" = domenica)
+// mescolerebbe dati della settimana sbagliata nel delta, dando un numero
+// sbagliato: per questo si guarda solo indietro, mai avanti.
 function findClosestReport(reports, targetIso, toleranceDays) {
   if (reports.length === 0) return null;
   const targetMs = new Date(targetIso).getTime();
   let best = null;
   let bestDiff = Infinity;
   for (const r of reports) {
-    const diff = Math.abs(new Date(r.date).getTime() - targetMs);
+    const rMs = new Date(r.date).getTime();
+    if (rMs > targetMs) continue; // mai nel futuro rispetto al target
+    const diff = targetMs - rMs;
     if (diff < bestDiff) {
       bestDiff = diff;
       best = r;
     }
   }
+  if (!best) return null;
   const diffDays = bestDiff / (1000 * 60 * 60 * 24);
   return diffDays <= toleranceDays ? best : null;
 }
@@ -741,8 +747,10 @@ async function computeLeaderboards() {
   const mu = await warera.getMuById(MU_ID);
   const memberIds = mu.members ?? [];
 
-  // Dati LIVE (attuali): usati per le classifiche generali/totali, che non
-  // risentono di reset settimanali e vogliamo sempre aggiornate al momento.
+  // Dati LIVE (attuali): interrogati ora, ad ogni /classifica, per ogni
+  // membro della MU. Alimentano sia le classifiche generali/totali sia i
+  // danni settimanali (rankings.weeklyUserDamages è già un valore tracciato
+  // dal gioco stesso, quindi qui non serve nessun calcolo del bot).
   const current = [];
   for (const id of memberIds) {
     current.push(await getMemberStats(id));
@@ -769,7 +777,13 @@ async function computeLeaderboards() {
   // più recente disponibile invece dell'ultima settimana completa.
   const anchorReport = findClosestReport(reports, lastSundayIso, 3);
   const priorReport = findClosestReport(reports, twoSundaysAgoIso, 3);
-  const anchorMembers = anchorReport?.members ?? current; // fallback: dati live se non c'è ancora storico
+  // NIENTE fallback ai dati live qui: se non abbiamo uno snapshot vero della
+  // fine della settimana scorsa, anchorMembers resta vuoto. In precedenza il
+  // fallback a `current` mescolava, nel calcolo del delta, dati live di OGGI
+  // con lo snapshot di 2 settimane fa: il risultato non era "variazione
+  // della settimana scorsa" ma un periodo più lungo e indefinito, quindi un
+  // numero sbagliato mostrato come se fosse settimanale.
+  const anchorMembers = anchorReport?.members ?? [];
   const priorMap = new Map((priorReport?.members ?? []).map((m) => [m.username, m]));
   const hasWeekHistory = !!anchorReport && !!priorReport;
 
@@ -838,7 +852,11 @@ async function computeLeaderboards() {
     muName: mu.name,
     hasWeekHistory,
     hasMonthHistory: !!monthAgoReport,
-    weeklyDamage: buildRanking(anchorMembers, (m) => m.weeklyDamage),
+    // weeklyDamage: valore LIVE preso ora dall'API (rankings.weeklyUserDamages
+    // di ogni membro, via getMemberStats), esattamente come lo mostra il
+    // gioco stesso in questo momento — nessun calcolo o snapshot del bot di
+    // mezzo, quindi non può "sbagliare" o restare indietro.
+    weeklyDamage: buildRanking(current, (m) => m.weeklyDamage),
     monthlyDamage: buildRanking(withMonthlyDamage, (m) => m.value),
     weeklyBounty: buildRanking(withWeeklyBounty, (m) => m.value),
     weeklyWealthIncrease: buildRanking(withWeeklyWealthIncrease, (m) => m.value),
@@ -862,24 +880,28 @@ function buildLeaderboardEmbeds(lb) {
   const weeklyEmbed = new EmbedBuilder()
     .setTitle(`🏆 Classifica — ${lb.muName}`)
     .setColor(0xffd700)
-    .setDescription('📅 **Settimana scorsa** (lunedì → domenica)')
+    .setDescription(
+      '📅 **Periodo corrente**\n' +
+      '-# 💥 e 🎁 sono dati live dell\'API. 🎯 💰 📈 sono stime del bot ' +
+      '(WarEra non espone questi valori per periodo, solo il totale storico).',
+    )
     .addFields(
-      formatRankingField('💥 Danni settimanali', lb.weeklyDamage),
+      formatRankingField('💥 Danni settimanali (live)', lb.weeklyDamage),
       formatRankingField(
-        '💥 Danni mensili',
+        '📈 Danni ultimi 30gg (stima)',
         lb.monthlyDamage,
         numberFmt,
         lb.hasMonthHistory ? 'Dati non disponibili.' : 'In attesa di ~30 giorni di storico.',
       ),
-      formatRankingField('🎁 Donazioni alla MU', lb.weeklyDonations, numberFmt, 'Nessuna donazione registrata.'),
+      formatRankingField('🎁 Donazioni alla MU (settimana)', lb.weeklyDonations, numberFmt, 'Nessuna donazione registrata.'),
       formatRankingField(
-        '🎯 Bounty raccolte',
+        '🎯 Bounty (settimana, stima)',
         lb.weeklyBounty,
         numberFmt,
         lb.hasWeekHistory ? 'Dati non disponibili.' : 'In attesa di storico settimanale.',
       ),
       formatRankingField(
-        '💰 Aumento ricchezza',
+        '💰 Aumento ricchezza (stima)',
         lb.weeklyWealthIncrease,
         signedFmt,
         lb.hasWeekHistory ? 'Dati non disponibili.' : 'In attesa di storico settimanale.',
@@ -888,16 +910,18 @@ function buildLeaderboardEmbeds(lb) {
 
   const totalEmbed = new EmbedBuilder()
     .setColor(0xb8860b)
-    .setDescription('🌍 **Classifiche generali** (totale, sempre live)')
+    .setDescription('🌍 **Classifiche generali** — tutti valori live dall\'API, sempre esatti')
     .addFields(
-      formatRankingField('🔥 Record danni settimanali', lb.recordWeeklyDamage),
+      formatRankingField('🔥 Record danni settimanali*', lb.recordWeeklyDamage),
       formatRankingField('💥 Danni totali', lb.totalDamage),
       formatRankingField('🎁 Donazioni totali', lb.totalDonations, numberFmt, 'Nessuna donazione registrata.'),
       formatRankingField('🎯 Bounty totali', lb.totalBounty),
       formatRankingField('👑 Ricchezza totale', lb.totalWealth),
     )
     .setFooter({
-      text: 'Aggiornata ogni lunedì alle 8:00 · le classifiche settimanali/mensili si affinano con lo storico accumulato dal bot.',
+      text:
+        '* record settimanale = massimo osservato dal bot da quando è attivo, non un dato ufficiale del gioco. ' +
+        'Le stime settimanali si affinano più il bot resta online.',
     })
     .setTimestamp();
 
