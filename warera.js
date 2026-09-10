@@ -103,6 +103,20 @@ const warera = {
   // Contratti mercenari attivi (asta): endpoint POST con paginazione.
   getMercenaryContracts: (perPage = 50) =>
     postEndpoint('mercenaryContractAuction.getPaginatedAuctions', { perPage }),
+
+  // Donazioni fatte a una MU (cursor-paginated). Ogni elemento: { userId,
+  // muId, amount, createdAt, ... }. Endpoint confermato dalla documentazione
+  // community dell'API (donation.getManyPaginated). Proviamo prima GET (come
+  // la maggior parte delle query tRPC "get..."); se fallisce, ripieghiamo su
+  // POST, dato che alcuni endpoint di WarEra lo richiedono.
+  getDonationsByMu: async (muId, limit = 100, cursor) => {
+    const params = { muId, limit, ...(cursor ? { cursor } : {}) };
+    try {
+      return await callEndpoint('donation.getManyPaginated', params);
+    } catch (err) {
+      return await postEndpoint('donation.getManyPaginated', params);
+    }
+  },
 };
 
 module.exports = warera;
